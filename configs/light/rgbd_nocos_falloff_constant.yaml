@@ -1,0 +1,16 @@
+# Ablation of the main model (docs/DECISIONS.md D54): no distance falloff.
+# The inverse-square law is frozen at one reference distance (falloff
+# constant = 1 / distance^2), so the shading no longer depends on how far the
+# surface is from the lamp, while the average direct-to-ambient ratio is kept.
+# Everything else is rgbd_nocos.yaml.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  falloff:
+    type: constant
+    # (mean of 1/d^2 over in-cone pixels)^(-1/2), d = distance to the lamp,
+    # from the SENSOR depth of office0/lit frames 0-599 (every 10th frame),
+    # estimated t_CL and cone half-angle of light_params.json: 2.363 m.
+    # Keeps the mean direct light inside the cone. Same statistic over
+    # frames 0-1999: 2.328 m. Chosen by the user, 2026-10-22 (D54).
+    distance: {source: value, value: 2.36, learnable: false}

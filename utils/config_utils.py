@@ -33,6 +33,16 @@ def load_config(path, default_path=None):
     return cfg
  
 
+# A child config block containing `_replace: true` REPLACES the inherited block
+# instead of being merged into it (light extension, docs/DECISIONS.md D54).
+# Merging can add or overwrite keys but never remove one, so an ablation that
+# switches a light component to a form with fewer parameters (e.g.
+# Light.angular: uniform under a blender_spot parent) would keep the parent's
+# extra keys, which the light-model builders reject. The marker itself never
+# reaches the resolved config.
+REPLACE_KEY = "_replace"
+
+
 def update_recursive(dict1, dict2):
     """
     Update two config dictionaries recursively. dict1 get masked by dict2, and we retuen dict1.
@@ -42,6 +52,15 @@ def update_recursive(dict1, dict2):
         dict2 (dict): second dictionary which entries should be used.
     """
     for k, v in dict2.items():
+        if isinstance(v, dict) and REPLACE_KEY in v:
+            if v[REPLACE_KEY] is not True:
+                raise ValueError(
+                    f"'{REPLACE_KEY}' in config block '{k}' must be true, got {v[REPLACE_KEY]!r}"
+                )
+            fresh = dict()
+            update_recursive(fresh, {kk: vv for kk, vv in v.items() if kk != REPLACE_KEY})
+            dict1[k] = fresh
+            continue
         if k not in dict1:
             dict1[k] = dict()
         if isinstance(v, dict):

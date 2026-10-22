@@ -1,0 +1,10 @@
+# Ablation of the main model (docs/DECISIONS.md D54): no cone. Phi = 1
+# everywhere instead of the Blender spot profile, i.e. the lamp lights the
+# whole image like the inside of its cone. Everything else is rgbd_nocos.yaml.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  angular:
+    # Replace the inherited block: uniform has no half_angle_deg / blend.
+    _replace: true
+    type: uniform

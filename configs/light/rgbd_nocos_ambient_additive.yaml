@@ -1,0 +1,13 @@
+# Ablation of the main model (docs/DECISIONS.md D54): ambient as a constant
+# OFFSET, I = A * direct + c, instead of the multiplicative c * A verified on
+# the data (CLAUDE.md section 4.3). Everything else is rgbd_nocos.yaml.
+#
+# NOT a fair comparison of the two forms: c is inherited, i.e. the value
+# ESTIMATED FOR THE MULTIPLICATIVE FORM (light_params.json has no additive
+# estimate). The run measures the cost of the wrong form with the calibration
+# at hand. Chosen by the user, 2026-10-22 (D54).
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  ambient:
+    type: additive_const

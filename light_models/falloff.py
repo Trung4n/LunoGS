@@ -28,4 +28,23 @@ class Lorentzian:
         return 1.0 / (dist * dist + tau * tau)
 
 
+@register("falloff", "constant", numeric=("distance",))
+class Constant:
+    """1 / distance^2 everywhere: the inverse-square law frozen at ONE
+    reference distance. Ablation only (docs/DECISIONS.md D54): removes the
+    dependence on d_l while keeping the average direct-to-ambient ratio,
+    which a plain factor 1 would change by about d^2. `distance` is a
+    representative lamp-to-surface distance of the scene, from the config."""
+
+    def __init__(self, distance):
+        v = distance.value
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            raise ValueError(f"{distance.name} must be a number > 0, got {v!r}")
+        self.distance = distance.tensor()
+
+    def __call__(self, dist):
+        d = self.distance.to(dist.device, dist.dtype)
+        return (1.0 / (d * d)).expand_as(dist)
+
+
 declare_planned("falloff", "learned")

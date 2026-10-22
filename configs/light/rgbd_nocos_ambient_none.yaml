@@ -1,0 +1,10 @@
+# Ablation of the main model (docs/DECISIONS.md D54): no ambient light, I = A *
+# direct. Outside the cone the model then predicts black where the data has
+# the room's indirect light. Everything else is rgbd_nocos.yaml.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  ambient:
+    # Replace the inherited block: none has no c.
+    _replace: true
+    type: none

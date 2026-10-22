@@ -161,11 +161,15 @@ _SETTINGS_ONLY = {"verify_tracking.yaml"}
 
 
 def test_light_config_set():
-    # The kept set after the cleanup of D53; a new experiment is a new file
-    # here and a new line in this set.
+    # The set after the cleanup of D53 plus the component ablations of D54; a
+    # new experiment is a new file here and a new line in this set.
     assert {os.path.basename(p) for p in LIGHT_CONFIGS} == {
         "rgbd_nocos.yaml",
         "rgbd_lambert.yaml",
+        "rgbd_nocos_angular_uniform.yaml",
+        "rgbd_nocos_ambient_none.yaml",
+        "rgbd_nocos_ambient_additive.yaml",
+        "rgbd_nocos_falloff_constant.yaml",
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -306,3 +310,31 @@ def test_sensor_and_map_normals_agree_on_a_smooth_map(monkeypatch):
     a, b = out["sensor_depth_fd"], out["depth_fd"]
     assert torch.equal(a["light_normal_valid"], b["light_normal_valid"])
     torch.testing.assert_close(a["radiance_linear"], b["radiance_linear"])
+
+
+@pytest.mark.parametrize(
+    "name, block, expected",
+    [
+        ("rgbd_nocos_angular_uniform", "angular", {"type": "uniform"}),
+        ("rgbd_nocos_ambient_none", "ambient", {"type": "none"}),
+        ("rgbd_nocos_ambient_additive", "ambient",
+         {"type": "additive_const",
+          "c": {"source": "params_file", "key": "ambient.c_estimated", "learnable": False}}),
+        ("rgbd_nocos_falloff_constant", "falloff",
+         {"type": "constant", "distance": {"source": "value", "value": 2.36, "learnable": False}}),
+    ],
+)
+def test_component_ablations_change_one_block(monkeypatch, name, block, expected):
+    # D54: each ablation is rgbd_nocos.yaml with exactly ONE Light component
+    # changed, so a change in ATE is attributable to that component.
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    abl = load_config(f"configs/light/{name}.yaml")
+    main = load_config("configs/light/rgbd_nocos.yaml")
+    assert abl["Light"][block] == expected
+    assert main["Light"][block] != expected
+    for cfg in (abl, main):
+        cfg["Light"].pop(block)
+        cfg.pop("inherit_from")
+    assert abl == main
