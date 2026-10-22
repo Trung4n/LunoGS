@@ -75,10 +75,12 @@ def check(baselines, candidates):
             )
 
     runs = baselines + candidates
-    # Monocular => evaluate_evo aligned with Sim(3) (correct_scale=monocular).
-    for run in runs:
-        if run["config"]["Dataset"]["sensor_type"] != "monocular":
-            raise NotComparable(f"{run['dir']}: not a monocular run")
+    # One sensor type: evaluate_evo aligns monocular runs with Sim(3)
+    # (correct_scale=monocular) and the others with SE(3); ATEs under two
+    # alignments are not comparable.
+    sensors = {r["config"]["Dataset"]["sensor_type"] for r in runs}
+    if len(sensors) != 1:
+        raise NotComparable(f"runs use different sensor types: {sorted(sensors)}")
     datasets = {_dataset(r["config"]) for r in runs}
     if len(datasets) != 1:
         raise NotComparable(f"runs use different datasets: {sorted(datasets)}")

@@ -1,0 +1,26 @@
+# Ablation of the main model (docs/DECISIONS.md D49-D51, D53): rgbd_nocos.yaml
+# plus the Lambert term max(0, n . l), the light model the data was rendered
+# with (D51). Normals from the SENSOR depth of the observed frame: the
+# rasterized depth is a staircase (one depth per Gaussian), useless for
+# normals (D48). office0, 600 frames: ATE 0.0203 m vs 0.0156 m for
+# rgbd_nocos.yaml (D50).
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  cosine:
+    type: lambert
+    # stencil_px 1: on clean depth, 1-pixel differences matched ground truth
+    # (1-3% of the pixels with n . l < 0.3, D46).
+    normal_source: {type: sensor_depth_fd, stencil_px: 1}
+    # No warm-up: the warm-up (D43) is for monocular, whose first keyframes
+    # are at guessed depths.
+    warmup_keyframes: 0
+
+LightTracking:
+  pixel_weight:
+    enabled: True
+    # Drop pixels without a valid normal or with n . l below min_cos_nl, in
+    # both losses (D26).
+    apply_to: [tracking, mapping]
+    # = check_physics.py --cos-min. Confirmed 2026-09-29 (D26).
+    min_cos_nl: 0.3

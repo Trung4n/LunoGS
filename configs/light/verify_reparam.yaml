@@ -1,8 +1,9 @@
 # Re-parameterization test (docs/DECISIONS.md D6).
 #
-# Original MonoGS with the Gaussian color stored as LINEAR albedo and an
-# identity shader: render = linear2sRGB(albedo). Loss space, exposure
-# affine and everything else are the baseline's. The ATE must match the
+# Original MonoGS (RGB-D, the main setting, D53) with the Gaussian color
+# stored as LINEAR albedo and an identity shader: render =
+# linear2sRGB(albedo). Loss space, exposure affine and everything else are
+# the baseline's. The ATE must match the
 # baseline within Verify.reparam.ate_abs_tolerance_m; only a larger gap
 # points at the color path. It cannot match exactly: alpha blending of
 # linear colors differs from blending of sRGB colors at object edges and in
@@ -11,7 +12,7 @@
 # Run on the SAME dataset as the baseline being compared (override with
 # --dataset_path if needed), then:
 #   python tools/verify/check_reparam.py --baseline <run dir>... --candidate <run dir>...
-inherit_from: "configs/mono/replica/office0.yaml"
+inherit_from: "configs/rgbd/replica/office0.yaml"
 
 Light:
   enabled: True
@@ -30,7 +31,8 @@ Verify:
   reparam:
     # REQUIRED, no default: absolute tolerance on |mean ATE RMSE (candidate)
     # - mean ATE RMSE (baseline)|, in meters of the ground-truth trajectory
-    # (Sim(3)-aligned, monocular). MonoGS sets no seed, so choose it from the
+    # (SE(3)-aligned for RGB-D, Sim(3) for monocular: check_reparam.py only
+    # compares runs of one sensor type). MonoGS sets no seed, so choose it from the
     # run-to-run spread of the baseline itself. check_reparam.py refuses to
     # run while this is null.
     ate_abs_tolerance_m: null

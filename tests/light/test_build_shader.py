@@ -94,25 +94,6 @@ def test_identity_rejects_parameters():
         )
 
 
-def test_reparam_config_resolves(monkeypatch):
-    # configs/light/reparam_identity.yaml, resolved exactly as slam.py does
-    # (inherit_from paths are relative to the repo root).
-    from light_models import read_albedo_init, read_light_tracking
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    cfg = load_config("configs/light/reparam_identity.yaml")
-    assert type(build_shader(cfg)).__name__ == "IdentityShader"
-    assert read_albedo_init(cfg).strategy == "observed"
-    lt = read_light_tracking(cfg)
-    assert (lt.loss_color_space, lt.exposure_affine) == ("srgb", True)
-    # Everything else must be the baseline's.
-    base = load_config("configs/mono/replica/office0.yaml")
-    for key in ("Light", "LightTracking", "Verify", "inherit_from"):
-        cfg.pop(key, None)
-        base.pop(key, None)
-    assert cfg == base
-
 
 @pytest.mark.parametrize(
     "path",
@@ -138,84 +119,6 @@ def test_every_root_config_states_baseline_explicitly(path):
     }, path
 
 
-@pytest.mark.parametrize(
-    "name, light_enabled",
-    [
-        ("configs/light/baseline_satmask.yaml", False),
-        ("configs/light/4_2_nocos_sat.yaml", True),
-        ("configs/light/4_2_lambert_sat.yaml", True),
-    ],
-)
-def test_saturation_configs_resolve(monkeypatch, name, light_enabled):
-    from light_models import read_light_tracking
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    cfg = load_config(name)
-    assert cfg["Light"]["enabled"] is light_enabled
-    sm = read_light_tracking(cfg).saturation_mask
-    assert (sm.enabled, sm.mode, sm.apply_to) == (True, "pixel", ("tracking", "mapping"))
-    # The three runs must use the same threshold to be comparable.
-    base = read_light_tracking(load_config("configs/light/baseline_satmask.yaml"))
-    assert sm.threshold_8bit == base.saturation_mask.threshold_8bit
-
-
-@pytest.mark.parametrize(
-    "name, light_enabled",
-    [
-        ("configs/light/4_3_nocos_sat.yaml", True),
-        ("configs/light/4_3_lambert_sat.yaml", True),
-        ("configs/light/baseline_satmask_noaffine.yaml", False),
-    ],
-)
-def test_step_4_3_configs(monkeypatch, name, light_enabled):
-    from light_models import read_light_tracking
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    cfg = load_config(name)
-    lt = read_light_tracking(cfg)
-    assert cfg["Light"]["enabled"] is light_enabled
-    assert lt.exposure_affine is False and lt.saturation_mask.enabled is True
-
-
-def test_min_gradient_configs(monkeypatch):
-    from light_models import read_min_gradient
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    base = read_min_gradient(load_config("configs/light/baseline_satmask_mingrad.yaml"))
-    light = read_min_gradient(load_config("configs/light/4_3_nocos_sat_mingrad.yaml"))
-    assert base.enabled and light.enabled
-    # The two runs must use the same floor to be comparable.
-    assert base.threshold_8bit == light.threshold_8bit
-    assert load_config("configs/light/4_3_nocos_sat_mingrad.yaml")["Light"]["enabled"] is True
-
-
-@pytest.mark.parametrize("k", [2, 4, 8])
-def test_lambert_stencil_configs(monkeypatch, k):
-    from light_models.params import load_params_file  # noqa: F401
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    cfg = load_config(f"configs/light/4_3_lambert_sat_k{k}.yaml")
-    assert cfg["Light"]["cosine"] == {"type": "lambert", "warmup_keyframes": 10,
-                                      "normal_source": {"type": "depth_fd", "stencil_px": k}}
-    assert cfg["LightTracking"]["exposure_affine"] is False
-
-
-def test_lambert_opacity_and_weight_ablations(monkeypatch):
-    from light_models import build_shader as _build, read_light_tracking
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    op = load_config("configs/light/4_3_lambert_sat_op05.yaml")
-    mw = load_config("configs/light/4_3_lambert_sat_op05_mapw.yaml")
-    assert op["Light"]["gbuffer"]["opacity_thr"] == 0.5
-    assert mw["Light"]["gbuffer"]["opacity_thr"] == 0.5
-    assert read_light_tracking(op).pixel_weight.apply_to == ("tracking", "mapping")
-    assert read_light_tracking(mw).pixel_weight.apply_to == ("mapping",)
-    assert read_light_tracking(mw).exposure_affine is False
 
 
 @pytest.mark.parametrize(
@@ -236,54 +139,124 @@ def test_every_depth_config_states_alpha(path):
     assert isinstance(cfg["Training"]["alpha"], float), path
 
 
+# Stand-in for light_params.json with every key the configs read: the
+# estimated values (SLAM) and the Blender config values (verification, D13).
+# Arbitrary numbers, only the structure matters here.
 _FAKE_PARAMS = {
-    "intensity": {"K_estimated_step3": 30.0},
-    "t_CL_m": {"estimated_opencv": [0.0, -0.05, 0.0]},
-    "R_CL": {"estimated": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
-    "cone": {"half_angle_deg_estimated": 30.0, "blend_estimated": 0.35},
-    "ambient": {"c_estimated": 0.12},
+    "intensity": {"K_estimated_step3": 30.0, "K_theory": 30.0},
+    "t_CL_m": {"estimated_opencv": [0.0, -0.05, 0.0], "config_opencv": [0.0, -0.05, 0.0]},
+    "R_CL": {"estimated": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+             "config": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+    "cone": {"half_angle_deg_estimated": 30.0, "blend_estimated": 0.35,
+             "half_angle_deg_config": 30.0, "blend_config": 0.35},
+    "ambient": {"c_estimated": 0.12, "c_config": 0.12},
 }
 
 
+# ---- configs/light: the experiment and verification configs (D53) ----------
+
+LIGHT_CONFIGS = sorted(glob.glob(os.path.join(REPO, "configs", "light", "*.yaml")))
+# Settings files read by a tool next to an experiment config, not runnable.
+_SETTINGS_ONLY = {"verify_tracking.yaml"}
+
+
+def test_light_config_set():
+    # The kept set after the cleanup of D53; a new experiment is a new file
+    # here and a new line in this set.
+    assert {os.path.basename(p) for p in LIGHT_CONFIGS} == {
+        "rgbd_nocos.yaml",
+        "rgbd_lambert.yaml",
+        "verify_shading.yaml",
+        "verify_roundtrip.yaml",
+        "verify_tracking.yaml",
+        "verify_reparam.yaml",
+    }
+
+
 @pytest.mark.parametrize(
-    "name, cosine",
-    [
-        ("configs/light/rgbd_baseline_satmask.yaml", None),
-        ("configs/light/rgbd_4_2_nocos_sat.yaml", "none"),
-        ("configs/light/rgbd_4_3_nocos_sat.yaml", "none"),
-        ("configs/light/rgbd_4_3_lambert_sat.yaml", "lambert"),
-        ("configs/light/rgbd_4_3_lambert_sensor_sat.yaml", "lambert"),
-    ],
+    "path", [p for p in LIGHT_CONFIGS if os.path.basename(p) not in _SETTINGS_ONLY]
 )
-def test_rgbd_configs(monkeypatch, name, cosine):
-    from light_models import build_shader as _build, read_light_tracking
+def test_every_light_config_resolves_and_builds(monkeypatch, path):
+    # Resolved exactly as slam.py does (inherit_from relative to the repo
+    # root); every runnable config is RGB-D (D47, D53) and builds its shader.
+    pytest.importorskip("torch")
+    from light_models import read_light_tracking
     from utils.config_utils import load_config
 
     monkeypatch.chdir(REPO)
-    cfg = load_config(name)
+    cfg = load_config(os.path.relpath(path, REPO))
     assert cfg["Dataset"]["sensor_type"] == "depth"
-    assert cfg["Training"]["alpha"] == 0.95
+    read_light_tracking(cfg)
+    assert build_shader(cfg, _FAKE_PARAMS) is not None
+
+
+def test_verify_reparam_is_the_rgbd_baseline_with_an_identity_shader(monkeypatch):
+    from light_models import read_albedo_init, read_light_tracking
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    cfg = load_config("configs/light/verify_reparam.yaml")
+    assert type(build_shader(cfg)).__name__ == "IdentityShader"
+    assert read_albedo_init(cfg).strategy == "observed"
     lt = read_light_tracking(cfg)
-    base = read_light_tracking(load_config("configs/light/baseline_satmask.yaml"))
-    assert lt.saturation_mask.threshold_8bit == base.saturation_mask.threshold_8bit
-    if cosine is None:
-        assert cfg["Light"]["enabled"] is False and lt.exposure_affine is True
-        return
-    assert lt.exposure_affine is ("4_2_" in name)
-    assert cfg["Light"]["cosine"]["type"] == cosine
-    assert type(_build(cfg, _FAKE_PARAMS)).__name__ == "ColocatedShader"
-    assert lt.pixel_weight.enabled is (cosine == "lambert")
+    assert (lt.loss_color_space, lt.exposure_affine) == ("srgb", True)
+    # Everything else must be the baseline's.
+    base = load_config("configs/rgbd/replica/office0.yaml")
+    for key in ("Light", "LightTracking", "Verify", "inherit_from"):
+        cfg.pop(key, None)
+        base.pop(key, None)
+    assert cfg == base
 
 
-def test_rgbd_albedo_init_resolves_and_is_refused_for_monocular(monkeypatch):
+def test_main_model_rgbd_nocos(monkeypatch):
+    pytest.importorskip("torch")
+    from light_models import read_light_tracking
+    from light_models.albedo_init import get_albedo_init
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    cfg = load_config("configs/light/rgbd_nocos.yaml")
+    assert cfg["Training"]["alpha"] == 0.95
+    assert cfg["Light"]["cosine"] == {"type": "none"}
+    lt = read_light_tracking(cfg)
+    assert lt.exposure_affine is False and lt.pixel_weight.enabled is False
+    sm = lt.saturation_mask
+    assert (sm.enabled, sm.mode, sm.apply_to) == (True, "pixel", ("tracking", "mapping"))
+    # The saturation threshold is the one of the verification (D16, D44).
+    shading = load_config("configs/light/verify_shading.yaml")
+    assert sm.threshold_8bit == shading["Verify"]["layer1"]["saturation_8bit"]
+    assert type(build_shader(cfg, _FAKE_PARAMS)).__name__ == "ColocatedShader"
+    get_albedo_init(cfg)
+
+
+def test_lambert_differs_from_the_main_model_only_by_the_cosine(monkeypatch):
+    from light_models import read_light_tracking
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    lam = load_config("configs/light/rgbd_lambert.yaml")
+    nocos = load_config("configs/light/rgbd_nocos.yaml")
+    assert lam["Light"]["cosine"] == {
+        "type": "lambert", "warmup_keyframes": 0,
+        "normal_source": {"type": "sensor_depth_fd", "stencil_px": 1},
+    }
+    pw = read_light_tracking(lam).pixel_weight
+    assert (pw.enabled, pw.apply_to, pw.min_cos_nl) == (True, ("tracking", "mapping"), 0.3)
+    for cfg in (lam, nocos):
+        cfg["Light"].pop("cosine")
+        cfg["LightTracking"].pop("pixel_weight")
+        cfg.pop("inherit_from")
+    assert lam == nocos
+
+
+def test_placement_depth_albedo_init_refused_for_monocular(monkeypatch):
     pytest.importorskip("torch")
     from light_models.albedo_init import get_albedo_init
     from utils.config_utils import load_config
 
     monkeypatch.chdir(REPO)
-    cfg = load_config("configs/light/rgbd_4_3_lambert_sat.yaml")
+    cfg = load_config("configs/light/rgbd_nocos.yaml")
     assert cfg["Light"]["init_albedo"]["strategy"] == "placement_depth"
-    get_albedo_init(cfg)
     cfg["Dataset"]["sensor_type"] = "monocular"
     with pytest.raises(ValueError, match="measured"):
         get_albedo_init(cfg)
@@ -296,22 +269,22 @@ def test_sensor_depth_normals_refused_for_monocular(monkeypatch):
     from utils.config_utils import load_config
 
     monkeypatch.chdir(REPO)
-    cfg = load_config("configs/light/rgbd_4_3_lambert_sensor_sat.yaml")
-    assert cfg["Light"]["cosine"]["normal_source"]["type"] == "sensor_depth_fd"
+    cfg = load_config("configs/light/rgbd_lambert.yaml")
     assert build_shader(cfg, _FAKE_PARAMS).requires_sensor_depth is True
     cfg["Dataset"]["sensor_type"] = "monocular"
     with pytest.raises(ValueError, match="monocular"):
         build_shader(cfg, _FAKE_PARAMS)
-    # The other normal sources do not read the sensor.
-    nocos = load_config("configs/light/rgbd_4_3_lambert_sat.yaml")
-    nocos["Dataset"]["sensor_type"] = "monocular"
-    assert build_shader(nocos, _FAKE_PARAMS).requires_sensor_depth is False
+    # Sources that do not read the sensor are allowed.
+    depth_fd = load_config("configs/light/rgbd_lambert.yaml")
+    depth_fd["Light"]["cosine"]["normal_source"] = {"type": "depth_fd", "stencil_px": 1}
+    depth_fd["Dataset"]["sensor_type"] = "monocular"
+    assert build_shader(depth_fd, _FAKE_PARAMS).requires_sensor_depth is False
 
 
 def test_sensor_and_map_normals_agree_on_a_smooth_map(monkeypatch):
     # When the rasterized depth IS the sensor depth (smooth, same pixel
-    # convention), both normal sources must shade identically: the only
-    # difference between the two configs is where n comes from.
+    # convention), sensor_depth_fd and depth_fd must shade identically: the
+    # only difference between them is where n comes from.
     torch = pytest.importorskip("torch")
     from types import SimpleNamespace
 
@@ -326,27 +299,10 @@ def test_sensor_and_map_normals_agree_on_a_smooth_map(monkeypatch):
     g = {"albedo": torch.full((3, h, w), 0.5, dtype=torch.float64), "depth": z[None],
          "opacity": torch.ones(1, h, w, dtype=torch.float64), "pixel_offset": 0.0}
     out = {}
-    for name in ("rgbd_4_3_lambert_sat", "rgbd_4_3_lambert_sensor_sat"):
-        shader = build_shader(load_config(f"configs/light/{name}.yaml"), _FAKE_PARAMS)
-        out[name] = shader(g, cam)
-    a, b = out["rgbd_4_3_lambert_sat"], out["rgbd_4_3_lambert_sensor_sat"]
+    for source in ("sensor_depth_fd", "depth_fd"):
+        cfg = load_config("configs/light/rgbd_lambert.yaml")
+        cfg["Light"]["cosine"]["normal_source"] = {"type": source, "stencil_px": 1}
+        out[source] = build_shader(cfg, _FAKE_PARAMS)(g, cam)
+    a, b = out["sensor_depth_fd"], out["depth_fd"]
     assert torch.equal(a["light_normal_valid"], b["light_normal_valid"])
     torch.testing.assert_close(a["radiance_linear"], b["radiance_linear"])
-
-
-def test_rgbd_nocos_without_saturation_mask(monkeypatch):
-    # Ablation of the main model (D52): identical to rgbd_4_3_nocos_sat
-    # except the saturation mask.
-    from light_models import read_light_tracking
-    from utils.config_utils import load_config
-
-    monkeypatch.chdir(REPO)
-    off = load_config("configs/light/rgbd_4_3_nocos.yaml")
-    on = load_config("configs/light/rgbd_4_3_nocos_sat.yaml")
-    assert read_light_tracking(off).saturation_mask.enabled is False
-    assert read_light_tracking(on).saturation_mask.enabled is True
-    off["LightTracking"].pop("saturation_mask")
-    on["LightTracking"].pop("saturation_mask")
-    off.pop("inherit_from")
-    on.pop("inherit_from")
-    assert off == on

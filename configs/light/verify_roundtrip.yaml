@@ -1,9 +1,10 @@
-# Albedo round-trip check of step 4.1 (tools/verify/albedo_roundtrip.py).
+# Albedo round-trip check (tools/verify/albedo_roundtrip.py).
 # NOT a SLAM run: Gaussians are created from the GROUND-TRUTH albedo pass and
 # depth at the ground-truth pose, rasterized, and compared with the albedo
 # pass. Checks the color path (0.5 SH offset, sRGB->linear, opacity
 # weighting, pixel sampling) without any optimization or randomness from SLAM.
-inherit_from: "configs/mono/replica/office0.yaml"
+# RGB-D baseline as base, the main setting (D47, D53).
+inherit_from: "configs/rgbd/replica/office0.yaml"
 
 Dataset:
   # One Gaussian per valid pixel, so the rasterized map is dense.

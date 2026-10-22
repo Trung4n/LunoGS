@@ -3,8 +3,6 @@
 # predicted linear radiance. Both constant forms exist so they can be
 # compared (CLAUDE.md section 4.3); the data verified the multiplicative one.
 
-import torch
-
 from light_models.registry import declare_planned, register
 
 

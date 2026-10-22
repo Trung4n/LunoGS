@@ -2,7 +2,7 @@
 but the shader gets RASTERIZED maps, as in SLAM, instead of ground-truth
 passes.
 
-    python tools/verify/shading_layer2.py --config configs/light/verify_4_2.yaml \
+    python tools/verify/shading_layer2.py --config configs/light/verify_shading.yaml \
         --params-file <scene>/light_params.json --bundle <export dir>/<room> --frames 0 500
 
 Gaussians are created at the ground-truth pose from the ground-truth depth

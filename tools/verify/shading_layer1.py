@@ -2,7 +2,7 @@
 ground-truth depth, normals and albedo -> the SAME light_models/ shader SLAM
 uses -> predicted image, compared with the rendered lit image (PNG).
 
-    python tools/verify/shading_layer1.py --config configs/light/verify_4_2.yaml \
+    python tools/verify/shading_layer1.py --config configs/light/verify_shading.yaml \
         --params-file <scene>/light_params.json --bundle <export dir>/<room> --frames 0 500
 
 CPU only. The bundle comes from tools/verify/export_gt_npy.py (run in the

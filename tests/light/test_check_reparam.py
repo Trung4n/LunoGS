@@ -93,3 +93,12 @@ def test_missing_stats_is_rejected(tmp_path):
     os.remove(os.path.join(b, "plot", "stats_final.json"))
     c = _run(tmp_path, "c0", _candidate_cfg(), 0.010)
     assert check_reparam.main(["--baseline", b, "--candidate", c]) == 2
+
+
+def test_rgbd_runs_are_compared_among_themselves(tmp_path):
+    # The main setting is RGB-D (D47, D53): runs of one sensor type, any type,
+    # are comparable (all aligned the same way by evaluate_evo).
+    rgbd = {"dataset_path": DATASET, "sensor_type": "depth"}
+    b = [_run(tmp_path, "b0", {**_baseline_cfg(), "Dataset": rgbd}, 0.010)]
+    c = [_run(tmp_path, "c0", {**_candidate_cfg(tol=0.002), "Dataset": rgbd}, 0.011)]
+    assert check_reparam.main(["--baseline", *b, "--candidate", *c]) == 0

@@ -1,0 +1,57 @@
+# MAIN MODEL (docs/DECISIONS.md D49-D53): RGB-D MonoGS with the co-located
+# light, no n . l term. office0, 600 frames: ATE 0.0156 m; 2000 frames:
+# 0.022 m (original MonoGS on the lit data: 0.84 m, on the even data: 0.01 m).
+#
+# Light parameters: the ESTIMATED values of the per-scene light_params.json
+# (offline calibration, D13). No exposure affine (it brings nothing in RGB-D,
+# D49). Saturation mask kept: physically motivated, no measurable effect on
+# ATE (D52). The plain RGB-D baseline is configs/rgbd/replica/office0.yaml.
+inherit_from: "configs/rgbd/replica/office0.yaml"
+
+Light:
+  enabled: True
+  # Relative to Dataset.dataset_path; one file per scene / b-sweep level (D17).
+  params_file: light_params.json
+  shader:
+    type: colocated
+  intensity: {source: params_file, key: intensity.K_estimated_step3, learnable: false}
+  pose:
+    t_CL: {source: params_file, key: t_CL_m.estimated_opencv, learnable: false}
+    R_CL: {source: params_file, key: R_CL.estimated, learnable: false}
+  falloff:
+    type: inverse_square
+  angular:
+    type: blender_spot
+    half_angle_deg: {source: params_file, key: cone.half_angle_deg_estimated, learnable: false}
+    blend: {source: params_file, key: cone.blend_estimated, learnable: false}
+  cosine:
+    # No n . l: the learned albedo absorbs the orientation term (D51).
+    type: none
+  ambient:
+    type: multiplicative_const
+    c: {source: params_file, key: ambient.c_estimated, learnable: false}
+  gbuffer:
+    # Rasterized depth trusted (divided by opacity, D5) above this; lower
+    # pixels are shaded at the median trusted depth (D21). D45.
+    opacity_thr: 0.5
+  init_albedo:
+    # De-shade each pixel at its MEASURED sensor depth (D47).
+    strategy: placement_depth
+    # Bound on the shading divided out; below the ambient c it never triggers
+    # with multiplicative ambient (D26).
+    min_shading: 0.05
+
+LightTracking:
+  loss_color_space: srgb
+  exposure_affine: False
+  pixel_weight:
+    enabled: False
+  saturation_mask:
+    enabled: True
+    # pixel: a pixel saturated in any channel is dropped in all three.
+    mode: pixel
+    # Compared with the observed image's 8-bit codes, before gamma removal.
+    # = the --sat threshold of Replica/scripts/physics_check/check_physics.py
+    # (also Verify.layer1.saturation_8bit). Confirmed 2026-09-30 (D44).
+    threshold_8bit: 250
+    apply_to: [tracking, mapping]

@@ -1,8 +1,10 @@
-# Verification of step 4.2 (tools/verify/shading_layer1.py, shading_layer2.py).
-# NOT a SLAM run. Light parameters are the Blender CONFIG values of
-# light_params.json (docs/DECISIONS.md D13), to separate code errors from
-# calibration errors; the SLAM configs use the estimated values.
-inherit_from: "configs/mono/replica/office0.yaml"
+# Verification of the image-space shading (tools/verify/shading_layer1.py,
+# shading_layer2.py). NOT a SLAM run. Light parameters are the Blender CONFIG
+# values of light_params.json (docs/DECISIONS.md D13), to separate code
+# errors from calibration errors; the SLAM configs use the estimated values.
+# Inherits the RGB-D baseline, the main setting (D47, D53); the scripts build
+# their maps from the ground-truth bundle, not from the sensor.
+inherit_from: "configs/rgbd/replica/office0.yaml"
 
 Light:
   enabled: True
