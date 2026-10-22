@@ -160,6 +160,29 @@ LIGHT_CONFIGS = sorted(glob.glob(os.path.join(REPO, "configs", "light", "*.yaml"
 _SETTINGS_ONLY = {"verify_tracking.yaml"}
 
 
+# Calibration sensitivity (D57): name -> (path of the ParamSpec in Light,
+# expected perturb block).
+_SENSITIVITY = {
+    "half_angle_m2deg": (("angular", "half_angle_deg"), {"add": -2.0}),
+    "half_angle_m1deg": (("angular", "half_angle_deg"), {"add": -1.0}),
+    "half_angle_p1deg": (("angular", "half_angle_deg"), {"add": 1.0}),
+    "half_angle_p2deg": (("angular", "half_angle_deg"), {"add": 2.0}),
+    "tilt_1deg": (("pose", "R_CL"), {"rotate_deg": 1.0, "axis": [1.0, 0.0, 0.0]}),
+    "tilt_2deg": (("pose", "R_CL"), {"rotate_deg": 2.0, "axis": [1.0, 0.0, 0.0]}),
+    "tilt_5deg": (("pose", "R_CL"), {"rotate_deg": 5.0, "axis": [1.0, 0.0, 0.0]}),
+    "tcl_y1cm": (("pose", "t_CL"), {"add": [0.0, 0.01, 0.0]}),
+    "tcl_y2cm": (("pose", "t_CL"), {"add": [0.0, 0.02, 0.0]}),
+    "k_x080": (("intensity",), {"scale": 0.8}),
+    "k_x090": (("intensity",), {"scale": 0.9}),
+    "k_x110": (("intensity",), {"scale": 1.1}),
+    "k_x120": (("intensity",), {"scale": 1.2}),
+    "c_x080": (("ambient", "c"), {"scale": 0.8}),
+    "c_x120": (("ambient", "c"), {"scale": 1.2}),
+    "blend_x080": (("angular", "blend"), {"scale": 0.8}),
+    "blend_x120": (("angular", "blend"), {"scale": 1.2}),
+}
+
+
 def test_light_config_set():
     # The set after the cleanup of D53 plus the component ablations of D54; a
     # new experiment is a new file here and a new line in this set.
@@ -170,6 +193,7 @@ def test_light_config_set():
         "rgbd_nocos_ambient_none.yaml",
         "rgbd_nocos_ambient_additive.yaml",
         "rgbd_nocos_falloff_constant.yaml",
+        *(f"rgbd_nocos_sens_{n}.yaml" for n in _SENSITIVITY),
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -338,3 +362,23 @@ def test_component_ablations_change_one_block(monkeypatch, name, block, expected
         cfg["Light"].pop(block)
         cfg.pop("inherit_from")
     assert abl == main
+
+
+@pytest.mark.parametrize("name", sorted(_SENSITIVITY))
+def test_sensitivity_configs_perturb_one_parameter(monkeypatch, name):
+    # D57: each sensitivity run is rgbd_nocos.yaml plus ONE perturb block on
+    # one light parameter; the nominal value still comes from the params file.
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    path, perturb = _SENSITIVITY[name]
+    sens = load_config(f"configs/light/rgbd_nocos_sens_{name}.yaml")
+    main = load_config("configs/light/rgbd_nocos.yaml")
+    spec = sens["Light"]
+    for part in path:
+        spec = spec[part]
+    assert spec.pop("perturb") == perturb
+    assert spec["source"] == "params_file"
+    sens.pop("inherit_from")
+    main.pop("inherit_from")
+    assert sens == main

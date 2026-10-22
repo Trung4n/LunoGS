@@ -1,0 +1,9 @@
+# Calibration sensitivity (docs/DECISIONS.md D57): rgbd_nocos.yaml with ONE
+# light parameter deliberately wrong.
+# Error: intensity K scaled by 1.2.
+# The nominal value is still the estimate read from light_params.json; only
+# the error below is written here. Everything else is rgbd_nocos.yaml.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  intensity: {perturb: {scale: 1.2}}

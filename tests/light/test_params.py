@@ -92,3 +92,70 @@ def test_params_file_missing(tmp_path):
     cfg = {"Dataset": {"dataset_path": str(tmp_path)}, "Light": {"params_file": "nope.json"}}
     with pytest.raises(FileNotFoundError):
         load_params_file(params_file_path(cfg))
+
+
+# ---- perturb: deliberate calibration errors (D57) --------------------------
+
+_DATA = {"K": 30.0, "t": [0.0, -0.05, 0.0], "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}
+
+
+def _spec(key, perturb, **extra):
+    from light_models.params import resolve_param
+
+    block = {"source": "params_file", "key": key, "learnable": False, "perturb": perturb, **extra}
+    return resolve_param(block, f"Light.{key}", _DATA)
+
+
+def test_perturb_scale_and_add_keep_the_nominal():
+    k = _spec("K", {"scale": 0.8})
+    assert k.value == pytest.approx(24.0) and k.nominal == 30.0 and k.perturb == {"scale": 0.8}
+    t = _spec("t", {"add": [0.0, 0.01, 0.0]})
+    assert t.value == pytest.approx([0.0, -0.04, 0.0]) and t.nominal == [0.0, -0.05, 0.0]
+
+
+def test_unperturbed_spec_has_no_nominal():
+    from light_models.params import resolve_param
+
+    s = resolve_param({"source": "value", "value": 2.0, "learnable": False}, "x", None)
+    assert s.value == 2.0 and s.nominal is None and s.perturb is None
+
+
+def test_perturb_rotate_tilts_the_light_axis_by_the_angle():
+    import math
+
+    r = _spec("R", {"rotate_deg": 5.0, "axis": [1.0, 0.0, 0.0]}).value
+    # Orthonormal, and the light axis a_L = R e_z moved by exactly 5 deg.
+    for i in range(3):
+        for j in range(3):
+            dot = sum(r[k][i] * r[k][j] for k in range(3))
+            assert dot == pytest.approx(1.0 if i == j else 0.0, abs=1e-12)
+    assert math.degrees(math.acos(r[2][2])) == pytest.approx(5.0)
+    assert r[0][2] == pytest.approx(0.0, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    "key, perturb, error",
+    [
+        ("K", {"scale": 0.0}, ValueError),
+        ("K", {"scale": True}, ValueError),
+        ("K", {"scale": 0.8, "add": 1.0}, ValueError),  # two operations
+        ("K", {}, ValueError),  # none
+        ("t", {"add": [0.0, 0.01]}, ValueError),  # wrong shape
+        ("K", {"add": [1.0]}, ValueError),  # wrong shape
+        ("K", {"rotate_deg": 2.0, "axis": [1.0, 0.0, 0.0]}, ValueError),  # not 3x3
+        ("R", {"rotate_deg": 2.0, "axis": [0.0, 0.0, 0.0]}, ValueError),  # zero axis
+        ("R", {"rotate_deg": 2.0}, KeyError),  # axis missing
+        ("R", {"rotate_deg": 2.0, "axis": [1, 0, 0], "scale": 2.0}, ValueError),
+        ("K", {"scale": 0.8, "typo": 1}, ValueError),
+        ("K", 0.8, TypeError),
+    ],
+)
+def test_perturb_validated(key, perturb, error):
+    with pytest.raises(error):
+        _spec(key, perturb)
+
+
+def test_perturb_combines_with_learnable():
+    # A wrong starting value for a learned parameter (self-calibration later).
+    s = _spec("K", {"scale": 1.2}, learnable=True, lr=0.01, prior_weight=0.0)
+    assert s.learnable and s.value == pytest.approx(36.0)
