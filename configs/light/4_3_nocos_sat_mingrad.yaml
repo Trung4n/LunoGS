@@ -1,8 +1,0 @@
-# Step 4.3 (light model, affine off) + absolute gradient floor (D37).
-# Same floor as baseline_satmask_mingrad.yaml (keep them equal).
-inherit_from: "configs/light/4_3_nocos_sat.yaml"
-
-LightTracking:
-  min_gradient:
-    enabled: True
-    threshold_8bit: 2.0

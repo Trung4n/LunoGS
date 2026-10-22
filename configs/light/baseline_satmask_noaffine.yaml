@@ -1,7 +1,0 @@
-# Control run for step 4.3 (D33): ORIGINAL MonoGS (light off) + saturation
-# mask + exposure affine OFF. Separates the effect of removing the affine
-# from the effect of the light model, when compared with 4_3_nocos_sat.yaml.
-inherit_from: "configs/light/baseline_satmask.yaml"
-
-LightTracking:
-  exposure_affine: False

@@ -1,7 +1,0 @@
-# Step 4.3 lambert with depth_fd over a 8-pixel stencil (D40): same as
-# 4_3_lambert_sat.yaml (stencil 1) except the normal source.
-inherit_from: "configs/light/4_3_lambert_sat.yaml"
-
-Light:
-  cosine:
-    normal_source: {type: depth_fd, stencil_px: 8}

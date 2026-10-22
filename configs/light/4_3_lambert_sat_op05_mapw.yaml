@@ -1,9 +1,0 @@
-# 4_3_lambert_sat_op05.yaml with the n.l pixel weight applied to MAPPING only
-# (D45): in tracking it removed ~90% of the pixels, mostly the edge pixels that
-# MonoGS's gradient mask keeps (normals are invalid at depth edges), leaving
-# ~0.9% of the image for the tracking loss.
-inherit_from: "configs/light/4_3_lambert_sat_op05.yaml"
-
-LightTracking:
-  pixel_weight:
-    apply_to: [mapping]

@@ -1,8 +1,0 @@
-# Step 4.3 with the Lambert term: 4_2_lambert_sat.yaml with exposure_affine
-# off. Used first by the tracking probe (D39), where the map comes from
-# ground truth and depth_fd normals are clean; a full SLAM run only if the
-# probe shows lambert helps tracking.
-inherit_from: "configs/light/4_2_lambert_sat.yaml"
-
-LightTracking:
-  exposure_affine: False

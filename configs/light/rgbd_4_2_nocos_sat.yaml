@@ -1,7 +1,0 @@
-# RGB-D ablation (D48): rgbd_4_3_nocos_sat.yaml with the exposure affine ON,
-# i.e. step 4.2. Separates the gain of the light model from that of
-# removing the affine term.
-inherit_from: "configs/light/rgbd_4_3_nocos_sat.yaml"
-
-LightTracking:
-  exposure_affine: True
