@@ -9,7 +9,8 @@ from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from light_models.albedo_init import get_albedo_init
-from light_models.diagnostics import log_albedo_stats, log_exposure
+from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light
+from light_models.learning import LightLearner
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
@@ -41,6 +42,8 @@ class BackEnd(mp.Process):
         self.pipeline_params = None
         self.opt_params = None  # 3DGS optimizer/densification hyperparameters
         self.background = None
+        # Optimizer of the learnable light parameters, built in run() (D60).
+        self.light_learner = None
         # self.shader is also set from slam.py, deliberately NOT initialized
         # here: None means "original MonoGS", so a forgotten assignment must
         # raise AttributeError instead of silently disabling the light model.
@@ -184,6 +187,27 @@ class BackEnd(mp.Process):
             self.log_albedo(frame_idx, "new", new)
         log_exposure(self.config["Results"]["save_dir"], frame_idx, "new", viewpoint)
 
+    def start_light_learning(self):
+        # Learnable light parameters (light_models/learning.py, D60): this
+        # process (mapping) is the only one that updates them. None when the
+        # run has no light model or nothing learnable.
+        self.light_learner = None
+        if self.shader is None:
+            return
+        params = self.shader.learnable_params()
+        if params:
+            self.shader.own_learnable_storage()
+            self.shader.set_learning(True)
+            self.light_learner = LightLearner(params)
+            Log(f"learning light parameters {sorted(params)} in mapping", tag="Light")
+
+    def log_learned(self, frame_idx):
+        if self.light_learner is not None:
+            log_learned_light(
+                self.config["Results"]["save_dir"], frame_idx, len(self.viewpoints),
+                self.shader.learnable_state(),
+            )
+
     def log_albedo(self, frame_idx, stage, mask=None):
         # Albedo > 1 diagnostics (light_models/diagnostics.py), light model
         # runs only. mask: optional (N,) bool selecting the Gaussians to count.
@@ -319,6 +343,10 @@ class BackEnd(mp.Process):
         for _ in range(iters):
             self.iteration_count += 1
             self.last_sent += 1
+            if self.light_learner is not None:
+                # Drops the light gradients of anything rendered since the
+                # last step (initialization, prune pass, albedo init).
+                self.light_learner.zero_grad()
 
             loss_mapping = 0
             # Per-view render outputs, accumulated for densification stats.
@@ -406,6 +434,10 @@ class BackEnd(mp.Process):
             scaling = self.gaussians.get_scaling
             isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
             loss_mapping += 10 * isotropic_loss.mean()
+            if self.light_learner is not None:
+                prior = self.light_learner.prior_loss(len(self.viewpoints))
+                if prior is not None:
+                    loss_mapping = loss_mapping + prior.to(loss_mapping.device)
             loss_mapping.backward()
             gaussian_split = False
             ## Deinsifying / Pruning Gaussians
@@ -518,6 +550,9 @@ class BackEnd(mp.Process):
                 self.gaussians.update_learning_rate(self.iteration_count)
                 self.keyframe_optimizers.step()
                 self.keyframe_optimizers.zero_grad(set_to_none=True)
+                if self.light_learner is not None:
+                    # Light parameters active per Light.schedule (D60).
+                    self.light_learner.step(len(self.viewpoints))
                 # Pose update
                 # Fold the stepped deltas into R,T for the newest
                 # pose_window keyframes. Frame 0 is never moved: it anchors
@@ -539,6 +574,9 @@ class BackEnd(mp.Process):
         # densification (max_radii2D is updated but unused). The xyz learning
         # rate schedule restarts from iteration 1.
         Log("Starting color refinement")
+        if self.shader is not None:
+            # The light is not refined offline: fixed at its learned value.
+            self.shader.set_learning(False)
 
         iteration_total = 26000
         for iteration in tqdm(range(1, iteration_total + 1)):
@@ -592,12 +630,16 @@ class BackEnd(mp.Process):
         if tag is None:
             tag = "sync_backend"
 
-        msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes]
+        # 5th element: learned light parameters ({} when none), applied to
+        # the frontend's shader (FrontEnd.sync_backend, D60).
+        light_state = self.shader.learnable_state() if self.shader is not None else {}
+        msg = [tag, clone_obj(self.gaussians), self.occ_aware_visibility, keyframes, light_state]
         self.frontend_queue.put(msg)
 
     def run(self):
         # Process entry point. Messages take priority; when the queue is empty
         # the backend keeps refining the current window.
+        self.start_light_learning()
         while True:
             if self.backend_queue.empty():
                 # Idle cases: paused, nothing to map yet, or no background
@@ -649,6 +691,7 @@ class BackEnd(mp.Process):
                     self.initialize_map(cur_frame_idx, viewpoint)
                     if self.shader is not None:
                         self.log_albedo(cur_frame_idx, "map")
+                    self.log_learned(cur_frame_idx)
                     log_exposure(
                         self.config["Results"]["save_dir"], cur_frame_idx, "map", viewpoint
                     )
@@ -744,6 +787,7 @@ class BackEnd(mp.Process):
                     self.map(self.current_window, prune=True)
                     if self.shader is not None:
                         self.log_albedo(cur_frame_idx, "map")
+                    self.log_learned(cur_frame_idx)
                     log_exposure(
                         self.config["Results"]["save_dir"],
                         cur_frame_idx,

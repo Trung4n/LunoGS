@@ -31,11 +31,30 @@ class IdentityShader:
     def __call__(self, gbuffer, viewpoint_camera):
         return {"radiance_linear": gbuffer["albedo"]}
 
+    # No light parameter at all, hence nothing to learn (D60).
+    def learnable_params(self):
+        return {}
+
+    def set_learning(self, on):
+        pass
+
+    def own_learnable_storage(self):
+        pass
+
+    def learnable_state(self):
+        return {}
+
+    def load_learnable_state(self, state):
+        if state:
+            raise ValueError(f"identity shader has no learnable parameter, got {sorted(state)}")
+
     def set_keyframe_count(self, n):
         pass
 
 
 def _make_identity(light_cfg, load_params):
+    if "schedule" in light_cfg:
+        raise ValueError("Light.schedule is meaningless with the identity shader")
     return IdentityShader()
 
 

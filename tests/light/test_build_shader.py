@@ -194,6 +194,11 @@ def test_light_config_set():
         "rgbd_nocos_ambient_additive.yaml",
         "rgbd_nocos_falloff_constant.yaml",
         *(f"rgbd_nocos_sens_{n}.yaml" for n in _SENSITIVITY),
+        "rgbd_nocos_sweep.yaml",
+        "rgbd_nocos_learn_half_angle_p2deg.yaml",
+        "rgbd_nocos_learn_half_angle_m2deg.yaml",
+        "rgbd_nocos_learn_tilt_5deg.yaml",
+        "rgbd_nocos_learn_cone.yaml",
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -382,3 +387,36 @@ def test_sensitivity_configs_perturb_one_parameter(monkeypatch, name):
     sens.pop("inherit_from")
     main.pop("inherit_from")
     assert sens == main
+
+
+def test_sweep_config_reads_the_configured_light_position(monkeypatch):
+    # D58: the b-sweep levels only have the CONFIGURED t_CL in their params
+    # file; everything else is rgbd_nocos.yaml.
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    sweep = load_config("configs/light/rgbd_nocos_sweep.yaml")
+    main = load_config("configs/light/rgbd_nocos.yaml")
+    assert sweep["Light"]["pose"]["t_CL"] == {
+        "source": "params_file", "key": "t_CL_m.config_opencv", "learnable": False}
+    for cfg in (sweep, main):
+        cfg["Light"]["pose"].pop("t_CL")
+        cfg.pop("inherit_from")
+    assert sweep == main
+
+
+@pytest.mark.parametrize("name, learned", [
+    ("rgbd_nocos_learn_half_angle_p2deg", ["angular.half_angle_deg"]),
+    ("rgbd_nocos_learn_half_angle_m2deg", ["angular.half_angle_deg"]),
+    ("rgbd_nocos_learn_tilt_5deg", ["pose.R_CL"]),
+    ("rgbd_nocos_learn_cone", ["angular.half_angle_deg", "pose.R_CL"]),
+])
+def test_self_calibration_configs(monkeypatch, name, learned):
+    # D60: the learned parameters, and nothing else becomes learnable.
+    pytest.importorskip("torch")
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    sh = build_shader(load_config(f"configs/light/{name}.yaml"), _FAKE_PARAMS)
+    assert sorted(sh.learnable_params()) == learned
+    assert build_shader(load_config("configs/light/rgbd_nocos.yaml"), _FAKE_PARAMS).learnable_params() == {}

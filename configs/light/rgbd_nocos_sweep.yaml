@@ -1,0 +1,16 @@
+# Light-camera offset sweep b in {0, 2, 5, 10, 20} cm (docs/DECISIONS.md D58):
+# rgbd_nocos.yaml with the light position read from t_CL_m.config_opencv
+# instead of t_CL_m.estimated_opencv. Run with --dataset_path pointing at one
+# level, <room>/sweep_b/b0pXX (400 frames each).
+#
+# Each level's light_params.json (Replica/scripts/make_sweep_light_params.py)
+# keeps the estimated intensity, cone, ambient and light axis of the main lit
+# data (the sweep only moves the lamp, checked on each level's render_info)
+# but only the CONFIGURED light position: the estimated one belongs to
+# b = 5 cm and is removed. So every level, b = 5 cm included, uses the
+# configured t_CL (at 5 cm it differs from the estimate by 0.5 mm).
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  pose:
+    t_CL: {key: t_CL_m.config_opencv}

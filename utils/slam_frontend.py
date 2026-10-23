@@ -487,6 +487,10 @@ class FrontEnd(mp.Process):
         occ_aware_visibility = data[2]
         keyframes = data[3]
         self.occ_aware_visibility = occ_aware_visibility
+        if self.shader is not None:
+            # Light parameters learned by the backend (D60); also seen by
+            # slam.py's evaluation, which shares this shader object.
+            self.shader.load_learnable_state(data[4])
 
         for kf_id, kf_R, kf_T in keyframes:
             self.cameras[kf_id].update_RT(kf_R.clone(), kf_T.clone())
@@ -506,6 +510,10 @@ class FrontEnd(mp.Process):
         #   c) process the next dataset frame: track it, then maybe turn it
         #      into a keyframe.
         # Returns when the dataset is exhausted.
+        if self.shader is not None:
+            # Tracking never optimizes light parameters (CLAUDE.md section
+            # 6): they are constants here, updated only from the backend.
+            self.shader.set_learning(False)
         cur_frame_idx = 0
         # Same intrinsics for every frame: built once, shared by all Cameras.
         projection_matrix = build_projection_matrix(

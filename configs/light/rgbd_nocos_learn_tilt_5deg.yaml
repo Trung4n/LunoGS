@@ -1,0 +1,18 @@
+# Self-calibration (docs/DECISIONS.md D60): rgbd_nocos.yaml with the light
+# axis starting tilted 5 deg about the camera x axis, learned during MAPPING
+# only (never in tracking). Compare with rgbd_nocos_sens_tilt_5deg.yaml (same
+# error, fixed: 0.0487 m) and rgbd_nocos.yaml (0.0156 m).
+#
+# lr: Adam step size in the parameter's unit (degrees). Starting value
+# 0.01 deg per mapping iteration: a 2-5 deg error needs a few hundred steps
+# and a run has thousands; the synthetic wall of tests/light/test_learning.py
+# converges with 0.05. after_keyframes 10 = Training.window_size: start once
+# the first window is mapped. prior_weight 0: pure self-calibration, nothing
+# pulls back to the (wrong) starting value. TO CONFIRM.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  pose:
+    R_CL: {perturb: {rotate_deg: 5.0, axis: [1.0, 0.0, 0.0]}, learnable: true, lr: 0.01, prior_weight: 0.0}
+  schedule:
+    - {after_keyframes: 10, unfreeze: [pose.R_CL]}

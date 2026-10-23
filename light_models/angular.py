@@ -34,6 +34,16 @@ class BlenderSpot:
         self.half_angle_deg = half_angle_deg.tensor()
         self.blend = blend.tensor()
 
+    def check_values(self):
+        # Domain of the form; re-checked after every update of a learned
+        # parameter (light_models/learning.py, D60): leaving it is an error,
+        # not something to clamp silently.
+        a, b = float(self.half_angle_deg.detach()), float(self.blend.detach())
+        if not 0 < a < 90:
+            raise ValueError(f"Light.angular.half_angle_deg left (0, 90): {a!r}")
+        if not 0 < b <= 1:
+            raise ValueError(f"Light.angular.blend left (0, 1]: {b!r}")
+
     def __call__(self, cos_theta):
         a = self.half_angle_deg.to(cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
         blend = self.blend.to(cos_theta.device, cos_theta.dtype)

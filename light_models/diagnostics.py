@@ -146,6 +146,43 @@ def log_pixel_usage(save_dir, frame_idx, stats):
         f.write(",".join(_format(row.get(c)) for c in _PIXEL_USAGE_COLUMNS) + "\n")
 
 
+LEARNED_CSV_NAME = "light_learned.csv"
+
+
+def _flatten(state):
+    # {"angular.half_angle_deg": 31.2, "pose.R_CL": [0.1, -0.3]} ->
+    # [("angular.half_angle_deg", 31.2), ("pose.R_CL[0]", 0.1), ...]
+    out = []
+    for path in sorted(state):
+        v = state[path]
+        if isinstance(v, list):
+            for i, x in enumerate(v):
+                out.append((f"{path}[{i}]", float(x)))
+        else:
+            out.append((path, float(v)))
+    return out
+
+
+def log_learned_light(save_dir, frame_idx, n_keyframes, state):
+    """Learned light parameters after a keyframe's mapping (D60): console
+    line + <save_dir>/light_learned.csv. pose.R_CL is the tilt of the light
+    axis in degrees (about camera x, y)."""
+    flat = _flatten(state)
+    Log(
+        f"learned light kf {frame_idx} ({n_keyframes} keyframes): "
+        + ", ".join(f"{name}={v:.4f}" for name, v in flat),
+        tag="Light",
+    )
+    if save_dir is None:
+        return
+    path = os.path.join(save_dir, LEARNED_CSV_NAME)
+    write_header = not os.path.exists(path)
+    with open(path, "a", encoding="utf-8") as f:
+        if write_header:
+            f.write(",".join(["frame_idx", "n_keyframes"] + [n for n, _ in flat]) + "\n")
+        f.write(",".join([str(frame_idx), str(n_keyframes)] + [_format(v) for _, v in flat]) + "\n")
+
+
 def summarize_csv_logs(save_dir):
     """End-of-run summary of the per-frame / per-keyframe CSVs of this module,
     as text lines printed into the log (so the numbers survive when the
@@ -178,6 +215,15 @@ def summarize_csv_logs(save_dir):
     if expo:
         gains = [float(r["gain_exp_a"]) for r in expo]
         lines.append(f"exposure gain exp(a) over {len(expo)} keyframes: {quantiles(gains)}")
+    learned = rows(LEARNED_CSV_NAME)
+    if learned:
+        cols = [c for c in learned[0] if c not in ("frame_idx", "n_keyframes")]
+        lines.append(f"learned light parameters over {len(learned)} keyframes (first -> middle -> last):")
+        mid = learned[len(learned) // 2]
+        for c in cols:
+            lines.append(
+                f"  {c:28s} {float(learned[0][c]):.4f} -> {float(mid[c]):.4f} -> {float(learned[-1][c]):.4f}"
+            )
     albedo = [r for r in rows(CSV_NAME) if r["stage"] == "map" and r.get("mean")]
     if albedo:
         last = albedo[-1]

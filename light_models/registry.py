@@ -68,5 +68,11 @@ def build_component(kind, block, where, params_data):
         n: resolve_param(require_key(block, n, where), f"{where}.{n}", params_data)
         for n in numeric
     }
+    specs = dict(kwargs)
     kwargs.update({o: require_key(block, o, where) for o in options})
-    return cls(**kwargs)
+    obj = cls(**kwargs)
+    # The resolved numeric ParamSpecs, so the shader can find the learnable
+    # ones (light_models/learning.py, D60). Convention: a component keeps a
+    # numeric parameter's tensor in the attribute of the same name.
+    obj._param_specs = specs
+    return obj

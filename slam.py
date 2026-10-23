@@ -403,8 +403,6 @@ if __name__ == "__main__":
             experiment + "__" + path[-2] + "_" + path[-1],
             current_datetime,
         )
-        tmp = args.config
-        tmp = tmp.split(".")[0]
         config["Results"]["save_dir"] = save_dir
         mkdir_p(save_dir)
         with open(os.path.join(save_dir, "config.yml"), "w") as file:
@@ -413,7 +411,10 @@ if __name__ == "__main__":
         Log("saving results in " + save_dir)
         run = wandb.init(
             project="MonoGS",
-            name=f"{tmp}_{current_datetime}",
+            # Same experiment label as the results folder: config name plus the
+            # dataset it ran on, so runs of one config on several scenes or
+            # sweep levels are told apart on W&B (D58).
+            name=f"{experiment}__{path[-2]}_{path[-1]}_{current_datetime}",
             config=config,
             mode=None if config["Results"]["use_wandb"] else "disabled",
         )
