@@ -1,7 +1,7 @@
 import copy
+import queue
 
 import torch
-import torch.multiprocessing as mp
 
 
 class FakeQueue:
@@ -9,13 +9,29 @@ class FakeQueue:
         del arg
 
     def get_nowait(self):
-        raise mp.queues.Empty
+        # queue.Empty, the exception of multiprocessing queues (original
+        # MonoGS raised mp.queues.Empty, which torch.multiprocessing does not
+        # have: AttributeError; found with drain_queue, D62).
+        raise queue.Empty
 
     def qsize(self):
         return 0
 
     def empty(self):
         return True
+
+
+def drain_queue(q):
+    """Removes every message currently in `q` WITHOUT blocking; returns how
+    many. Unlike `while not q.empty(): q.get()`, it cannot hang when another
+    process takes the last message between empty() and get() (D62)."""
+    n = 0
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            return n
+        n += 1
 
 
 def clone_obj(obj):

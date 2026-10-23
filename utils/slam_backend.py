@@ -12,7 +12,7 @@ from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light
 from light_models.learning import LightLearner
 from utils.logging_utils import Log
-from utils.multiprocessing_utils import clone_obj
+from utils.multiprocessing_utils import clone_obj, drain_queue
 from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_images, get_loss_mapping
 
@@ -797,9 +797,10 @@ class BackEnd(mp.Process):
                     self.push_to_frontend("keyframe")
                 else:
                     raise Exception("Unprocessed data", data)
-        # "stop": drain both queues so the process can exit cleanly.
-        while not self.backend_queue.empty():
-            self.backend_queue.get()
-        while not self.frontend_queue.empty():
-            self.frontend_queue.get()
+        # "stop": drain both queues so the process can exit cleanly. Non-
+        # blocking (D62): slam.py drains frontend_queue at the same time, and
+        # a blocking get() after empty() could wait forever.
+        drain_queue(self.backend_queue)
+        drain_queue(self.frontend_queue)
+        Log("Backend run loop finished")
         return

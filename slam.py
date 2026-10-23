@@ -24,7 +24,7 @@ from utils.dataset import load_dataset
 from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
 from utils.logging_utils import Log
 from utils.trajectory_analysis import run_report
-from utils.multiprocessing_utils import FakeQueue
+from utils.multiprocessing_utils import FakeQueue, drain_queue
 from utils.slam_backend import BackEnd
 from utils.slam_frontend import FrontEnd
 
@@ -321,8 +321,18 @@ class SLAM:
                 save_gaussians(self.gaussians, self.save_dir, "final_before_opt", final=True)
 
         # Clean shutdown: stop the backend process, then the GUI process (if any).
+        # The backend may still have pushed map syncs after the frontend
+        # stopped reading. The --eval rendering path emptied frontend_queue as
+        # a side effect; without it (--skip_render_eval, or no --eval) those
+        # messages, holding CUDA tensors shared with this process, stayed
+        # queued and the run hung at join() (D62). So keep emptying the queue
+        # until the backend has exited.
+        drain_queue(frontend_queue)
+        Log("Stopping the backend")
         backend_queue.put(["stop"])
-        backend_process.join()
+        while backend_process.is_alive():
+            drain_queue(frontend_queue)
+            backend_process.join(timeout=0.01)
         Log("Backend stopped and joined the main thread")
         if self.use_gui:
             q_main2vis.put(gui_utils.GaussianPacket(finish=True))
