@@ -82,6 +82,8 @@ class SLAM:
             # live demo always needs the viewer to monitor tracking quality
             self.use_gui = True
         self.eval_rendering = self.config["Results"]["eval_rendering"]
+        # Offline color refinement before the after_opt metrics (D61).
+        self.color_refinement = require_key(self.config["Results"], "color_refinement", "Results")
 
         # sh_degree: 0 = only the DC (flat color) term, 3 = full view-dependent color.
         model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
@@ -274,43 +276,49 @@ class SLAM:
                 FPS,
             )
 
-            # re-used the frontend queue to retrive the gaussians from the backend.
-            while not frontend_queue.empty():
-                frontend_queue.get()
-            # Ask backend to run offline "color refinement" (26k iters, standard 3DGS
-            # photometric optimization with poses frozen) to get the "after" metrics.
-            backend_queue.put(["color_refinement"])
-            while True:
-                if frontend_queue.empty():
-                    time.sleep(0.01)
-                    continue
-                data = frontend_queue.get()
-                if data[0] == "sync_backend" and frontend_queue.empty():
-                    gaussians = data[1]
-                    self.gaussians = gaussians
-                    break
+            if self.color_refinement:
+                # re-used the frontend queue to retrive the gaussians from the backend.
+                while not frontend_queue.empty():
+                    frontend_queue.get()
+                # Ask backend to run offline "color refinement" (26k iters, standard 3DGS
+                # photometric optimization with poses frozen) to get the "after" metrics.
+                backend_queue.put(["color_refinement"])
+                while True:
+                    if frontend_queue.empty():
+                        time.sleep(0.01)
+                        continue
+                    data = frontend_queue.get()
+                    if data[0] == "sync_backend" and frontend_queue.empty():
+                        gaussians = data[1]
+                        self.gaussians = gaussians
+                        break
 
-            rendering_result = eval_rendering(
-                self.frontend.cameras,
-                self.gaussians,
-                self.dataset,
-                self.save_dir,
-                self.pipeline_params,
-                self.background,
-                kf_indices=kf_indices,
-                iteration="after_opt",
-                shader=self.shader,
-            )
-            metrics_table.add_data(
-                "After",
-                rendering_result["mean_psnr"],
-                rendering_result["mean_ssim"],
-                rendering_result["mean_lpips"],
-                ATE,
-                FPS,
-            )
-            wandb.log({"Metrics": metrics_table})
-            save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
+                rendering_result = eval_rendering(
+                    self.frontend.cameras,
+                    self.gaussians,
+                    self.dataset,
+                    self.save_dir,
+                    self.pipeline_params,
+                    self.background,
+                    kf_indices=kf_indices,
+                    iteration="after_opt",
+                    shader=self.shader,
+                )
+                metrics_table.add_data(
+                    "After",
+                    rendering_result["mean_psnr"],
+                    rendering_result["mean_ssim"],
+                    rendering_result["mean_lpips"],
+                    ATE,
+                    FPS,
+                )
+                wandb.log({"Metrics": metrics_table})
+                save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
+            else:
+                # --skip_color_refinement (D61): only the before_opt metrics.
+                Log("color refinement skipped: no after_opt metrics", tag="Eval")
+                wandb.log({"Metrics": metrics_table})
+                save_gaussians(self.gaussians, self.save_dir, "final_before_opt", final=True)
 
         # Clean shutdown: stop the backend process, then the GUI process (if any).
         backend_queue.put(["stop"])
@@ -360,6 +368,21 @@ if __name__ == "__main__":
         help="Process only the first N frames (quick diagnostic runs). Recorded "
         "as Dataset.max_frames in the run's config.yml; omitted = whole sequence",
     )
+    # Cheaper --eval runs (D61). Neither changes the ATE: the final ATE is
+    # computed by the frontend when the sequence ends (and logged to W&B),
+    # before any rendering evaluation, and color refinement freezes poses.
+    parser.add_argument(
+        "--skip_color_refinement",
+        action="store_true",
+        help="With --eval: skip the 26000-iteration offline color refinement and "
+        "the after_opt rendering metrics; the before_opt metrics are kept",
+    )
+    parser.add_argument(
+        "--skip_render_eval",
+        action="store_true",
+        help="With --eval: skip all rendering metrics (PSNR/SSIM/LPIPS, before and "
+        "after) and the color refinement; ATE and trajectory analysis only",
+    )
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -388,6 +411,15 @@ if __name__ == "__main__":
         config["Results"]["eval_rendering"] = True
         Log("\tuse_wandb=True")
         config["Results"]["use_wandb"] = True
+    if args.skip_color_refinement or args.skip_render_eval:
+        if not args.eval:
+            raise ValueError("--skip_color_refinement / --skip_render_eval only apply with --eval")
+        # Recorded in the run's config.yml.
+        config["Results"]["color_refinement"] = False
+        Log("\tcolor_refinement=False")
+    if args.skip_render_eval:
+        config["Results"]["eval_rendering"] = False
+        Log("\teval_rendering=False (--skip_render_eval: ATE only)")
 
     if config["Results"]["save_results"]:
         mkdir_p(config["Results"]["save_dir"])

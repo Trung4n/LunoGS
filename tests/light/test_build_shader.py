@@ -420,3 +420,19 @@ def test_self_calibration_configs(monkeypatch, name, learned):
     sh = build_shader(load_config(f"configs/light/{name}.yaml"), _FAKE_PARAMS)
     assert sorted(sh.learnable_params()) == learned
     assert build_shader(load_config("configs/light/rgbd_nocos.yaml"), _FAKE_PARAMS).learnable_params() == {}
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted(
+        glob.glob(os.path.join(REPO, "configs", "**", "base_config.yaml"), recursive=True)
+        + glob.glob(os.path.join(REPO, "configs", "live", "*.yaml"))
+    ),
+)
+def test_every_root_config_states_color_refinement(path):
+    # slam.py requires Results.color_refinement (D61); True = original MonoGS
+    # behaviour of --eval, --skip_color_refinement / --skip_render_eval set it
+    # to False.
+    with open(path, "r") as f:
+        cfg = yaml.full_load(f)
+    assert cfg["Results"]["color_refinement"] is True, path

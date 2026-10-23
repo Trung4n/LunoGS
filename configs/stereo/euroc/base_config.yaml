@@ -6,6 +6,10 @@ Results:
   save_trj_kf_intv: 5
   use_gui: True
   eval_rendering: False
+  # With eval_rendering: offline color refinement (26000 iterations, poses
+  # frozen) before the after_opt rendering metrics. Does not change the ATE.
+  # slam.py --skip_color_refinement sets it to False (D61).
+  color_refinement: True
   use_wandb: False
   # Keyframe trajectory analysis printed at the end of each run
   # (utils/trajectory_analysis.py): sliding-window size for the local
