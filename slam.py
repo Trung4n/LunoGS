@@ -327,12 +327,18 @@ class SLAM:
         # messages, holding CUDA tensors shared with this process, stayed
         # queued and the run hung at join() (D62). So keep emptying the queue
         # until the backend has exited.
-        drain_queue(frontend_queue)
+        # Messages read after the backend exited can reference shared memory
+        # it already released: skipped and counted, never needed (D64).
+        unreadable = (OSError, RuntimeError, EOFError)
+        _, bad = drain_queue(frontend_queue, tolerate=unreadable)
         Log("Stopping the backend")
         backend_queue.put(["stop"])
         while backend_process.is_alive():
-            drain_queue(frontend_queue)
+            bad += drain_queue(frontend_queue, tolerate=unreadable)[1]
             backend_process.join(timeout=0.01)
+        bad += drain_queue(frontend_queue, tolerate=unreadable)[1]
+        if bad:
+            Log(f"{bad} unreadable leftover backend message(s) discarded at shutdown")
         Log("Backend stopped and joined the main thread")
         if self.use_gui:
             q_main2vis.put(gui_utils.GaussianPacket(finish=True))

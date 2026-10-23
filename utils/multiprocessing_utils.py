@@ -21,16 +21,24 @@ class FakeQueue:
         return True
 
 
-def drain_queue(q):
-    """Removes every message currently in `q` WITHOUT blocking; returns how
-    many. Unlike `while not q.empty(): q.get()`, it cannot hang when another
-    process takes the last message between empty() and get() (D62)."""
-    n = 0
+def drain_queue(q, tolerate=()):
+    """Removes every message currently in `q` WITHOUT blocking; returns
+    (messages removed, messages that could not be read). Unlike
+    `while not q.empty(): q.get()`, it cannot hang when another process takes
+    the last message between empty() and get() (D62).
+
+    tolerate: exception types raised while UNPICKLING a message that are
+    counted and skipped instead of propagated. Only for messages being thrown
+    away at shutdown: a message whose sender has already exited can reference
+    shared memory that no longer exists (FileNotFoundError, D64)."""
+    n = bad = 0
     while True:
         try:
             q.get_nowait()
         except queue.Empty:
-            return n
+            return n, bad
+        except tolerate:
+            bad += 1
         n += 1
 
 

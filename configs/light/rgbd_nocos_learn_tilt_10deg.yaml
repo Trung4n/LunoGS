@@ -1,0 +1,9 @@
+# Convergence basin of the self-calibration (docs/DECISIONS.md D65, stage A):
+# rgbd_nocos_learn_tilt_5deg.yaml (D64: 5 deg -> corrected by 5.06 deg, ATE
+# 0.0158 m) with the light axis starting tilted 10 deg about the camera x
+# axis. Same lr, schedule and prior as tilt_5deg.
+inherit_from: "configs/light/rgbd_nocos_learn_tilt_5deg.yaml"
+
+Light:
+  pose:
+    R_CL: {perturb: {rotate_deg: 10.0, axis: [1.0, 0.0, 0.0]}}

@@ -1,0 +1,19 @@
+# Self-calibration of the whole light model (docs/DECISIONS.md D65, stage A):
+# rgbd_nocos_learn_all.yaml starting from a calibration that is wrong in
+# EVERY learned parameter at once:
+#   half-angle +2 deg, light axis tilted 2 deg (about camera x), blend x0.8,
+#   light position +1 cm along y, ambient c x1.5.
+# The t_CL prior pulls towards the WRONG start, as a ruler measurement 1 cm
+# off would. Compare with rgbd_nocos_learn_all.yaml (correct start) and
+# rgbd_nocos.yaml (0.0156 m, 600 frames).
+inherit_from: "configs/light/rgbd_nocos_learn_all.yaml"
+
+Light:
+  pose:
+    t_CL: {perturb: {add: [0.0, 0.01, 0.0]}}
+    R_CL: {perturb: {rotate_deg: 2.0, axis: [1.0, 0.0, 0.0]}}
+  angular:
+    half_angle_deg: {perturb: {add: 2.0}}
+    blend: {perturb: {scale: 0.8}}
+  ambient:
+    c: {perturb: {scale: 1.5}}

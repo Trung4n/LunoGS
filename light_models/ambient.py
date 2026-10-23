@@ -16,6 +16,14 @@ def _const(spec):
     return t.view(-1, 1, 1) if t.dim() == 1 else t
 
 
+def _check_nonnegative(name, t):
+    # Ambient light cannot be negative; re-checked after every update of a
+    # learned c (light_models/learning.py, D60, D65): leaving the domain is an
+    # error, never clamped silently.
+    if bool((t.detach() < 0).any()):
+        raise ValueError(f"{name} left [0, inf): {t.detach().tolist()!r}")
+
+
 def _direct3(direct):
     return direct if direct.dim() == 3 else direct[None]
 
@@ -35,6 +43,10 @@ class MultiplicativeConst:
 
     def __init__(self, c):
         self.c = _const(c)
+        self.check_values()
+
+    def check_values(self):
+        _check_nonnegative("Light.ambient.c", self.c)
 
     def __call__(self, albedo, direct):
         c = self.c.to(albedo.device, albedo.dtype)
@@ -47,6 +59,10 @@ class AdditiveConst:
 
     def __init__(self, c):
         self.c = _const(c)
+        self.check_values()
+
+    def check_values(self):
+        _check_nonnegative("Light.ambient.c", self.c)
 
     def __call__(self, albedo, direct):
         c = self.c.to(albedo.device, albedo.dtype)

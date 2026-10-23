@@ -199,6 +199,12 @@ def test_light_config_set():
         "rgbd_nocos_learn_half_angle_m2deg.yaml",
         "rgbd_nocos_learn_tilt_5deg.yaml",
         "rgbd_nocos_learn_cone.yaml",
+        "rgbd_nocos_learn_all.yaml",
+        "rgbd_nocos_learn_all_perturbed.yaml",
+        "rgbd_nocos_learn_k1.yaml",
+        "rgbd_nocos_learn_half_angle_p4deg.yaml",
+        "rgbd_nocos_learn_half_angle_p6deg.yaml",
+        "rgbd_nocos_learn_tilt_10deg.yaml",
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -410,6 +416,12 @@ def test_sweep_config_reads_the_configured_light_position(monkeypatch):
     ("rgbd_nocos_learn_half_angle_m2deg", ["angular.half_angle_deg"]),
     ("rgbd_nocos_learn_tilt_5deg", ["pose.R_CL"]),
     ("rgbd_nocos_learn_cone", ["angular.half_angle_deg", "pose.R_CL"]),
+    ("rgbd_nocos_learn_all", ["ambient.c", "angular.blend", "angular.half_angle_deg", "pose.R_CL", "pose.t_CL"]),
+    ("rgbd_nocos_learn_all_perturbed", ["ambient.c", "angular.blend", "angular.half_angle_deg", "pose.R_CL", "pose.t_CL"]),
+    ("rgbd_nocos_learn_k1", ["ambient.c", "angular.blend", "angular.half_angle_deg", "pose.R_CL", "pose.t_CL"]),
+    ("rgbd_nocos_learn_half_angle_p4deg", ["angular.half_angle_deg"]),
+    ("rgbd_nocos_learn_half_angle_p6deg", ["angular.half_angle_deg"]),
+    ("rgbd_nocos_learn_tilt_10deg", ["pose.R_CL"]),
 ])
 def test_self_calibration_configs(monkeypatch, name, learned):
     # D60: the learned parameters, and nothing else becomes learnable.
@@ -436,3 +448,41 @@ def test_every_root_config_states_color_refinement(path):
     with open(path, "r") as f:
         cfg = yaml.full_load(f)
     assert cfg["Results"]["color_refinement"] is True, path
+
+
+def test_stage_a_starting_values(monkeypatch):
+    # D65 stage A: K is never learned (gauge anchor); the perturbed run starts
+    # wrong in every learned parameter; learn_k1 uses K = 1 and a guessed c'.
+    pytest.importorskip("torch")
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+
+    def build(name):
+        return build_shader(load_config(f"configs/light/{name}.yaml"), _FAKE_PARAMS)
+
+    good, bad, k1 = build("rgbd_nocos_learn_all"), build("rgbd_nocos_learn_all_perturbed"), build("rgbd_nocos_learn_k1")
+    for sh in (good, bad, k1):
+        assert "intensity" not in sh.learnable_params()
+    g, b = good.learnable_state(), bad.learnable_state()
+    assert b["angular.half_angle_deg"] == pytest.approx(g["angular.half_angle_deg"] + 2.0)
+    assert b["angular.blend"] == pytest.approx(0.8 * g["angular.blend"])
+    assert b["ambient.c"] == pytest.approx(1.5 * g["ambient.c"])
+    assert b["pose.t_CL"][1] == pytest.approx(g["pose.t_CL"][1] + 0.01)
+    assert float(k1.intensity) == 1.0
+    assert k1.learnable_state()["ambient.c"] == pytest.approx(0.01)
+    cfg = load_config("configs/light/rgbd_nocos_learn_k1.yaml")
+    assert cfg["Light"]["init_albedo"]["min_shading"] < 0.01  # below the start c'
+    assert set(cfg["Light"]["intensity"]) == {"source", "value", "learnable"}
+
+
+def test_ambient_c_cannot_be_negative():
+    # Checked at construction and after every update of a learned c (D65).
+    pytest.importorskip("torch")
+    import light_models.ambient  # noqa: F401  (registers the forms)
+    from light_models.registry import build_component
+
+    negative = {"source": "value", "value": -0.1, "learnable": False}
+    for form in ("multiplicative_const", "additive_const"):
+        with pytest.raises(ValueError, match="ambient.c"):
+            build_component("ambient", {"type": form, "c": negative}, "Light.ambient", None)

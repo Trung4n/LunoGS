@@ -1,0 +1,9 @@
+# Convergence basin of the self-calibration (docs/DECISIONS.md D65, stage A):
+# rgbd_nocos_learn_half_angle_p2deg.yaml (D64: +2 deg -> 29.96 deg, ATE
+# 0.0131 m) with the cone half-angle starting 4 deg too LARGE. Answers how
+# rough the prior calibration may be. Same lr, schedule and prior as p2deg.
+inherit_from: "configs/light/rgbd_nocos_learn_half_angle_p2deg.yaml"
+
+Light:
+  angular:
+    half_angle_deg: {perturb: {add: 4.0}}

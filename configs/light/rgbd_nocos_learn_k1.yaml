@@ -1,0 +1,28 @@
+# No light-intensity calibration (docs/DECISIONS.md D65, stage A):
+# rgbd_nocos_learn_all.yaml with K = 1 and the ambient ratio c' = c / K
+# learned from a GUESS. Only c / K is observable (A (K Phi/d^2 + c) =
+# (A K)(Phi/d^2 + c/K)), so K = 1 is just a unit: the albedo carries K
+# (A' = A K) and c' is the ambient-to-lamp ratio, as in DarkGS (no K).
+# If c' converges and the ATE matches rgbd_nocos_learn_all.yaml, neither the
+# lamp intensity nor the ambient light needs measuring.
+#
+# Values and their status:
+#   intensity 1.0: the unit choice above, not a measurement.
+#   c' start 0.01: a GUESS, about 2.5x the estimate of office0
+#     (c_estimated / K_estimated ~ 0.0039); not copied from the params file.
+#   c' lr 2e-5: Adam step in the new, ~30x smaller unit of c'.
+#   init_albedo.min_shading 0.001: the bound is in shading units, which K = 1
+#     shrinks ~30x (outside the cone the shading is ~c'); the 0.05 of
+#     rgbd_nocos.yaml would clip the whole outside of the cone.
+# Caveat: the albedo is ~30x larger than with the calibrated K. Adam steps of
+# the Gaussian colours are absolute (feature_lr), so the albedo refines ~30x
+# more slowly in relative terms; a worse ATE here may come from that, not from
+# identifiability. The "albedo > 1" log is meaningless in this unit.
+inherit_from: "configs/light/rgbd_nocos_learn_all.yaml"
+
+Light:
+  intensity: {_replace: true, source: value, value: 1.0, learnable: false}
+  ambient:
+    c: {_replace: true, source: value, value: 0.01, learnable: true, lr: 2.0e-5, prior_weight: 0.0}
+  init_albedo:
+    min_shading: 0.001

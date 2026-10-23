@@ -1,0 +1,33 @@
+# Self-calibration of the WHOLE light model except the gauge anchor
+# (docs/DECISIONS.md D65, stage A): rgbd_nocos.yaml with the cone half-angle,
+# cone blend, light axis (2 tilts), light position and ambient c learned in
+# MAPPING only, all starting from the calibrated (estimated) values. Control
+# run: nothing may drift; compare with rgbd_nocos.yaml (0.0156 m, 600 frames).
+#
+# K stays fixed: only the ratio c / K is observable (A (K Phi/d^2 + c) =
+# (A K)(Phi/d^2 + c/K)), so one of the two anchors the scale; K is the lamp's
+# hardware property, c changes with the scene (DarkGS fixes K = 1 the same way).
+#
+# Starting values, TO CONFIRM. lr = Adam step size in the parameter's unit:
+#   half_angle_deg 0.01 deg, R_CL tilt 0.01 deg (as D60, converged in D64);
+#   blend 0.001 (value ~0.35, edge softness);
+#   t_CL 1e-4 m (0.1 mm per step);
+#   c 1e-4 (value ~0.12, about 0.1 % per step).
+# prior_weight: 0 (pure self-calibration) except t_CL, the least observable
+# parameter (D59: 2 cm off -> x1.2 only), kept near its measured value with
+# a weak penalty 1.0 * |t - t_start|^2, like the light-position prior of
+# SpotlessGS. after_keyframes 10 = Training.window_size, as D60.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  pose:
+    t_CL: {learnable: true, lr: 1.0e-4, prior_weight: 1.0}
+    R_CL: {learnable: true, lr: 0.01, prior_weight: 0.0}
+  angular:
+    half_angle_deg: {learnable: true, lr: 0.01, prior_weight: 0.0}
+    blend: {learnable: true, lr: 0.001, prior_weight: 0.0}
+  ambient:
+    c: {learnable: true, lr: 1.0e-4, prior_weight: 0.0}
+  schedule:
+    - after_keyframes: 10
+      unfreeze: [pose.t_CL, pose.R_CL, angular.half_angle_deg, angular.blend, ambient.c]
