@@ -205,6 +205,7 @@ def test_light_config_set():
         "rgbd_nocos_learn_half_angle_p4deg.yaml",
         "rgbd_nocos_learn_half_angle_p6deg.yaml",
         "rgbd_nocos_learn_tilt_10deg.yaml",
+        "rgbd_lambert_learn_all.yaml",
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -486,3 +487,21 @@ def test_ambient_c_cannot_be_negative():
     for form in ("multiplicative_const", "additive_const"):
         with pytest.raises(ValueError, match="ambient.c"):
             build_component("ambient", {"type": form, "c": negative}, "Light.ambient", None)
+
+
+def test_lambert_learn_all_is_learn_all_plus_the_lambert_of_rgbd_lambert(monkeypatch):
+    # D66 diagnostic: the only differences with rgbd_nocos_learn_all.yaml are
+    # the n . l term and its pixel weight, copied from rgbd_lambert.yaml.
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    diag = load_config("configs/light/rgbd_lambert_learn_all.yaml")
+    learn = load_config("configs/light/rgbd_nocos_learn_all.yaml")
+    lam = load_config("configs/light/rgbd_lambert.yaml")
+    assert diag["Light"]["cosine"] == lam["Light"]["cosine"]
+    assert diag["LightTracking"]["pixel_weight"] == lam["LightTracking"]["pixel_weight"]
+    for cfg in (diag, learn):
+        cfg["Light"].pop("cosine")
+        cfg["LightTracking"].pop("pixel_weight")
+        cfg.pop("inherit_from")
+    assert diag == learn

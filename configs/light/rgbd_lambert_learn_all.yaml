@@ -1,0 +1,22 @@
+# Diagnostic (docs/DECISIONS.md D66): rgbd_nocos_learn_all.yaml WITH the
+# n . l term. Under nocos the learned ambient c converged to ~0.147 from
+# every start, ~23 % above the physical 0.119. Hypothesis: nocos lacks n . l,
+# predicts tilted surfaces inside the cone too bright, the albedo is pulled
+# down and c grows to compensate outside the cone. If so, c learned here
+# should converge near 0.119.
+#
+# The Lambert block below is the one of rgbd_lambert.yaml (keep them equal;
+# a config inherits from one file only).
+inherit_from: "configs/light/rgbd_nocos_learn_all.yaml"
+
+Light:
+  cosine:
+    type: lambert
+    normal_source: {type: sensor_depth_fd, stencil_px: 1}
+    warmup_keyframes: 0
+
+LightTracking:
+  pixel_weight:
+    enabled: True
+    apply_to: [tracking, mapping]
+    min_cos_nl: 0.3
