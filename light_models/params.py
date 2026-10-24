@@ -9,6 +9,7 @@
 #     lr: <number>                # required iff learnable
 #     prior_weight: <number>      # required iff learnable; 0 = no penalty
 #     perturb: <block>            # optional, see below
+#     at_bound: error | project   # optional, learnable only, see below
 #
 # Nothing has a default. Keys that do not belong (e.g. lr on a fixed
 # parameter, key with source: value) are errors as well, so a typo cannot
@@ -29,6 +30,13 @@
 # rotate_deg left-multiplies: for R_CL (light -> camera) it rotates the light
 # axis a_L = R_CL e_z by g degrees about `axis` in the CAMERA frame.
 #
+# at_bound (docs/DECISIONS.md D70): what a learning step that leaves the
+# parameter's domain does. error (also when absent: the behaviour before
+# D70) stops the run; project puts the value back on the domain boundary
+# (projected gradient) and counts the clipped steps into light_learned.csv,
+# so it is never silent. Only forms with a defined projection accept project
+# (ambient c >= 0); the others refuse it when the shader is built.
+#
 # Parsing does not import torch; ParamSpec.tensor() does, lazily.
 
 import json
@@ -40,6 +48,7 @@ from dataclasses import dataclass
 from utils.config_utils import require_key
 
 _SOURCES = ("params_file", "value")
+_AT_BOUND = ("error", "project")
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,7 @@ class ParamSpec:
     prior_weight: object  # float or None
     nominal: object = None  # value before `perturb`, None if not perturbed
     perturb: object = None  # the perturb block, None if not perturbed
+    at_bound: str = "error"  # learnable only: "error" | "project" (D70)
 
     def tensor(self):
         """CPU float32 tensor of the value (requires_grad iff learnable).
@@ -206,7 +216,10 @@ def resolve_param(block, where, params_data):
         for name, v in (("lr", lr), ("prior_weight", prior_weight)):
             if isinstance(v, bool) or not isinstance(v, numbers.Real) or v < 0:
                 raise ValueError(f"{where}.{name} must be a number >= 0, got {v!r}")
-        allowed.update(("lr", "prior_weight"))
+        allowed.update(("lr", "prior_weight", "at_bound"))
+    at_bound = block.get("at_bound", "error") if learnable else "error"
+    if at_bound not in _AT_BOUND:
+        raise ValueError(f"{where}.at_bound must be one of {_AT_BOUND}, got {at_bound!r}")
 
     allowed.add("perturb")  # optional: a deliberate calibration error (D57)
     extra = set(block) - allowed
@@ -217,11 +230,11 @@ def resolve_param(block, where, params_data):
         )
     _check_numeric(value, where)
     if "perturb" not in block:
-        return ParamSpec(where, value, source, key, learnable, lr, prior_weight)
+        return ParamSpec(where, value, source, key, learnable, lr, prior_weight, at_bound=at_bound)
     perturbed = _apply_perturb(value, block["perturb"], where)
     # Printed so the log of a sensitivity run shows the value actually used.
     from utils.logging_utils import Log
 
     Log(f"{where} perturbed by {block['perturb']}: {value} -> {perturbed}", tag="Light")
     return ParamSpec(where, perturbed, source, key, learnable, lr, prior_weight,
-                     nominal=value, perturb=block["perturb"])
+                     nominal=value, perturb=block["perturb"], at_bound=at_bound)

@@ -42,17 +42,27 @@ class LearnableParam:
     # Zero-argument callable returning an extra penalty (tensor) of the
     # parameter, added while it is active (e.g. spline smoothness), or None.
     regularizer: object = None
+    # Steps whose value project() moved back onto the domain boundary
+    # (ParamSpec at_bound: project, D70); None when not counted.
+    n_at_bound: int = None
 
 
-def make_learnable(path, tensor, spec, check=None):
+def make_learnable(path, tensor, spec, check=None, project=None):
     """LearnableParam for a component tensor built from a learnable ParamSpec.
     The tensor must be the leaf created by ParamSpec.tensor(); a derived
-    tensor (e.g. an RGB view) cannot be optimized in place."""
+    tensor (e.g. an RGB view) cannot be optimized in place. project: the
+    component's projection onto the domain, required iff spec.at_bound is
+    "project" (it returns True when it moved the value)."""
     if not (tensor.is_leaf and tensor.requires_grad):
         raise NotImplementedError(
             f"Light.{path}: learnable is not supported for this form or shape "
             "(the component does not keep the parameter as a leaf tensor)"
         )
+    if spec.at_bound == "project":
+        if project is None:
+            raise NotImplementedError(f"Light.{path}: at_bound project is not supported for this parameter")
+        return LearnableParam(path, tensor, tensor.detach().clone(), float(spec.lr),
+                              float(spec.prior_weight), check=check, project=project, n_at_bound=0)
     return LearnableParam(path, tensor, tensor.detach().clone(), float(spec.lr),
                           float(spec.prior_weight), check=check)
 
@@ -112,6 +122,11 @@ class LightLearner:
     def active(self, n_keyframes):
         return [path for path, p in self.params.items() if n_keyframes > p.after_keyframes]
 
+    def at_bound_counts(self):
+        """{path: steps clipped onto the domain boundary} for the parameters
+        with at_bound: project (D70); logged with the learned values."""
+        return {path: p.n_at_bound for path, p in self.params.items() if p.n_at_bound is not None}
+
     def zero_grad(self):
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -142,7 +157,9 @@ class LightLearner:
                 p = self.params[path]
                 if p.project is not None:
                     with torch.no_grad():
-                        p.project()
+                        moved = p.project()
+                    if p.n_at_bound is not None and moved is True:
+                        p.n_at_bound += 1
                 if p.check is not None:
                     p.check()
         self.zero_grad()

@@ -19,9 +19,19 @@ def _const(spec):
 def _check_nonnegative(name, t):
     # Ambient light cannot be negative; re-checked after every update of a
     # learned c (light_models/learning.py, D60, D65): leaving the domain is an
-    # error, never clamped silently.
+    # error, unless the ParamSpec asks for the projection below (D70).
     if bool((t.detach() < 0).any()):
         raise ValueError(f"{name} left [0, inf): {t.detach().tolist()!r}")
+
+
+def _project_nonnegative(t):
+    # ParamSpec at_bound: project (D70): back onto c >= 0 after a learning
+    # step; True when a value was moved (counted in light_learned.csv). The
+    # bound 0 is the definition of the domain, not a tunable threshold.
+    moved = bool((t.detach() < 0).any())
+    if moved:
+        t.data.clamp_(min=0.0)
+    return moved
 
 
 def _direct3(direct):
@@ -48,6 +58,9 @@ class MultiplicativeConst:
     def check_values(self):
         _check_nonnegative("Light.ambient.c", self.c)
 
+    def project_c(self):
+        return _project_nonnegative(self.c)
+
     def __call__(self, albedo, direct):
         c = self.c.to(albedo.device, albedo.dtype)
         return albedo * (_direct3(direct) + c)
@@ -63,6 +76,9 @@ class AdditiveConst:
 
     def check_values(self):
         _check_nonnegative("Light.ambient.c", self.c)
+
+    def project_c(self):
+        return _project_nonnegative(self.c)
 
     def __call__(self, albedo, direct):
         c = self.c.to(albedo.device, albedo.dtype)

@@ -244,3 +244,61 @@ def test_own_storage_keeps_objects_and_values_but_unshares_memory():
         assert p.tensor.data_ptr() != before[k][1]  # new buffer
         assert p.tensor.requires_grad and p.tensor.is_leaf
     assert sh.learnable_state() == pytest.approx(state)
+
+
+# ---- at_bound: project (D70) ----------------------------------------------------
+
+def _learn_c(**extra):
+    cfg = _config(schedule=[{"after_keyframes": 0, "unfreeze": ["ambient.c"]}])
+    cfg["Light"]["ambient"]["c"] = _p("c", **{**_learn(), **extra})
+    return cfg
+
+
+def _push_c_below_zero(sh, learner):
+    t = sh.learnable_params()["ambient.c"].tensor
+    with torch.no_grad():
+        t.fill_(0.01)
+    t.grad = torch.tensor(1.0)  # Adam step of -lr (0.05): crosses 0
+    learner.step(1)
+    return t
+
+
+def test_ambient_c_below_zero_raises_by_default():
+    for extra in ({}, {"at_bound": "error"}):
+        sh = build_shader(_learn_c(**extra), PARAMS)
+        learner = LightLearner(sh.learnable_params())
+        assert learner.at_bound_counts() == {}
+        with pytest.raises(ValueError, match="ambient.c left"):
+            _push_c_below_zero(sh, learner)
+
+
+def test_ambient_c_projected_onto_zero_and_counted():
+    sh = build_shader(_learn_c(at_bound="project"), PARAMS)
+    learner = LightLearner(sh.learnable_params())
+    assert learner.at_bound_counts() == {"ambient.c": 0}
+    t = _push_c_below_zero(sh, learner)
+    assert float(t.detach()) == 0.0
+    assert learner.at_bound_counts() == {"ambient.c": 1}
+    # A step that stays inside the domain is not counted.
+    t.grad = torch.tensor(-1.0)
+    learner.step(1)
+    assert float(t.detach()) > 0 and learner.at_bound_counts() == {"ambient.c": 1}
+
+
+def test_at_bound_project_refused_where_no_projection_exists():
+    cfg = _config(half=_learn(), schedule=[{"after_keyframes": 0, "unfreeze": ["angular.half_angle_deg"]}])
+    cfg["Light"]["angular"]["half_angle_deg"]["at_bound"] = "project"
+    with pytest.raises(NotImplementedError, match="at_bound project"):
+        build_shader(cfg, PARAMS)
+
+
+@pytest.mark.parametrize("block, error", [
+    ({"source": "value", "value": 0.1, "learnable": False, "at_bound": "project"}, ValueError),
+    ({"source": "value", "value": 0.1, "learnable": True, "lr": 0.1, "prior_weight": 0.0,
+      "at_bound": "clamp"}, ValueError),
+])
+def test_at_bound_validated(block, error):
+    from light_models.params import resolve_param
+
+    with pytest.raises(error):
+        resolve_param(block, "Light.ambient.c", None)

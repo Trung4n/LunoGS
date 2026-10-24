@@ -552,6 +552,7 @@ def test_selfcal_reads_only_the_light_position_from_the_params_file(monkeypatch)
     assert sorted(sh.learnable_params()) == [
         "ambient.c", "angular.knot_values", "pose.R_CL", "pose.t_CL"]
     after = {p: lp.after_keyframes for p, lp in sh.learnable_params().items()}
-    assert after == {"ambient.c": 10, "angular.knot_values": 3, "pose.R_CL": 10, "pose.t_CL": 10}
+    assert after == {"ambient.c": 10, "angular.knot_values": 3, "pose.R_CL": 10, "pose.t_CL": 30}
+    assert cfg["Light"]["ambient"]["c"]["at_bound"] == "project"
     assert cfg["Light"]["intensity"] == {"source": "value", "value": 1.0, "learnable": False}
     assert cfg["Light"]["angular"]["init"] == {"type": "uniform"}

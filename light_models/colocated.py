@@ -94,8 +94,8 @@ class ColocatedShader:
         # Learnable light parameters (light_models/learning.py, D60).
         learnable = {}
 
-        def add(path, tensor, spec, check=None):
-            learnable[path] = make_learnable(path, tensor, spec, check)
+        def add(path, tensor, spec, check=None, project=None):
+            learnable[path] = make_learnable(path, tensor, spec, check, project)
 
         if intensity.learnable:
             add("intensity", self.intensity, intensity)
@@ -108,7 +108,8 @@ class ColocatedShader:
             for name, spec in comp._param_specs.items():
                 if spec.learnable:
                     add(f"{prefix}.{name}", getattr(comp, name), spec,
-                        getattr(comp, "check_values", None))
+                        getattr(comp, "check_values", None),
+                        getattr(comp, f"project_{name}", None))
             # Learnable tensors that are not ParamSpecs (e.g. the spline's
             # knot values, D67): the component builds their LearnableParam.
             extra = getattr(comp, "learnable_extra", None)

@@ -205,7 +205,7 @@ class BackEnd(mp.Process):
         if self.light_learner is not None:
             log_learned_light(
                 self.config["Results"]["save_dir"], frame_idx, len(self.viewpoints),
-                self.shader.learnable_state(),
+                self.shader.learnable_state(), self.light_learner.at_bound_counts(),
             )
 
     def log_albedo(self, frame_idx, stage, mask=None):
