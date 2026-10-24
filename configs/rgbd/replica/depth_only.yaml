@@ -1,0 +1,11 @@
+# Depth-only pose estimation (docs/DECISIONS.md D72): plain RGB-D MonoGS
+# with the photometric term switched off, alpha = 0 in BOTH the tracking and
+# the mapping loss (the mapping loss also optimizes the keyframe poses, so a
+# colour term there would still pull them). Answers "with RGB-D, why not
+# track on depth alone and ignore the light?". The map colours are then
+# never optimized: rendering metrics of this config are meaningless, only
+# the trajectory counts. Run with --dataset_path for other scenes.
+inherit_from: "configs/rgbd/replica/office0.yaml"
+
+Training:
+  alpha: 0.0

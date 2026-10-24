@@ -9,6 +9,8 @@ import trimesh
 from PIL import Image
 
 from gaussian_splatting.utils.graphics_utils import focal2fov
+from utils.depth_noise import apply_depth_noise, read_depth_noise
+from utils.logging_utils import Log
 
 try:
     import pyrealsense2 as rs
@@ -280,6 +282,13 @@ class MonocularDataset(BaseDataset):
         # Divisor that converts the raw depth image's integer pixel values
         # into metric depth (meters), e.g. depth_png / depth_scale.
         self.depth_scale = calibration["depth_scale"] if self.has_depth else None
+        # Optional synthetic sensor degradation of the depth (D72); None =
+        # the depth as read.
+        self.depth_noise = read_depth_noise(config["Dataset"])
+        if self.depth_noise is not None:
+            if not self.has_depth:
+                raise ValueError("Dataset.depth_noise is given but the dataset has no depth")
+            Log(f"depth degraded for the robustness experiment: {self.depth_noise}", tag="Dataset")
 
         # Default scene scale
         # Rough placeholder scene radius/center, in the original 3DGS "Scene"
@@ -313,6 +322,8 @@ class MonocularDataset(BaseDataset):
             # Raw depth image (e.g. 16-bit PNG) -> metric depth via depth_scale.
             depth_path = self.depth_paths[idx]
             depth = np.array(Image.open(depth_path)) / self.depth_scale
+            if self.depth_noise is not None:
+                depth = apply_depth_noise(depth, self.depth_noise, idx)
 
         # HWC uint8 [0,255] -> CHW float32 tensor in [0,1] on the target device;
         # this is the tensor format expected by the rasterizer/loss functions.

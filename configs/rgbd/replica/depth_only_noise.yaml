@@ -1,0 +1,21 @@
+# depth_only.yaml on DEGRADED sensor depth (docs/DECISIONS.md D72). Same
+# block as depth_noise.yaml (tested).
+inherit_from: "configs/rgbd/replica/depth_only.yaml"
+
+Dataset:
+  # Kinect-v1-like degradation of the SENSOR depth (docs/DECISIONS.md D72,
+  # utils/depth_noise.py). Values TO CONFIRM:
+  #   axial_sigma: the axial noise model of Nguyen, Izadi, Lovell (3DIMPVT
+  #     2012) for Kinect v1, sigma(z) = 0.0012 + 0.0019 (z - 0.4)^2 m
+  #     (6 mm at 2 m, 14 mm at 3 m); white per pixel, i.e. the optimistic
+  #     case (real sensor noise is spatially correlated);
+  #   max_range_m 4: the usable range of Kinect v1 (office0 depth stays
+  #     within ~1.2-4.3 m, so this cut is rarely active);
+  #   edge: pixels within 2 px of a depth jump > 10 % of z are lost
+  #     (~0.3-6 % of the pixels per office0 frame, D72);
+  #   seed: same noise for every config of the experiment.
+  depth_noise:
+    seed: 0
+    max_range_m: 4.0
+    axial_sigma: {a: 0.0012, b: 0.0019, z0: 0.4}
+    edge: {window_px: 2, rel_jump: 0.1}
