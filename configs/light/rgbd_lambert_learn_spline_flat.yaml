@@ -1,0 +1,23 @@
+# Diagnostic (docs/DECISIONS.md D69): rgbd_nocos_learn_spline_flat.yaml WITH
+# the n . l term. Under nocos the spline learned from a flat start has the
+# right cone edge but sits ~20 % low inside the cone (0.80 at 23 deg instead
+# of 1.00, Phi(0) = 1 fixed), the same ratio as the effective ambient c of
+# D66/D68 (0.119 / 0.147). Hypothesis: the spline absorbs the missing n . l
+# (Phi_learned ~ Phi_true * E[n . l | theta]). If so, the profile learned
+# here should stay near 1 in the core and match the Blender profile.
+#
+# The Lambert block below is the one of rgbd_lambert.yaml (keep them equal;
+# a config inherits from one file only).
+inherit_from: "configs/light/rgbd_nocos_learn_spline_flat.yaml"
+
+Light:
+  cosine:
+    type: lambert
+    normal_source: {type: sensor_depth_fd, stencil_px: 1}
+    warmup_keyframes: 0
+
+LightTracking:
+  pixel_weight:
+    enabled: True
+    apply_to: [tracking, mapping]
+    min_cos_nl: 0.3

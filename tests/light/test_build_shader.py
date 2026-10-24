@@ -210,6 +210,8 @@ def test_light_config_set():
         "rgbd_nocos_learn_spline_flat.yaml",
         "rgbd_nocos_learn_spline_wide.yaml",
         "rgbd_nocos_learn_spline_narrow.yaml",
+        "rgbd_lambert_learn_spline_flat.yaml",
+        "rgbd_nocos_selfcal.yaml",
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -493,14 +495,16 @@ def test_ambient_c_cannot_be_negative():
             build_component("ambient", {"type": form, "c": negative}, "Light.ambient", None)
 
 
-def test_lambert_learn_all_is_learn_all_plus_the_lambert_of_rgbd_lambert(monkeypatch):
-    # D66 diagnostic: the only differences with rgbd_nocos_learn_all.yaml are
-    # the n . l term and its pixel weight, copied from rgbd_lambert.yaml.
+@pytest.mark.parametrize("name", ["learn_all", "learn_spline_flat"])
+def test_lambert_learn_diagnostic_is_nocos_plus_the_lambert_of_rgbd_lambert(monkeypatch, name):
+    # D66 / D69 diagnostics: the only differences with the nocos learning
+    # config are the n . l term and its pixel weight, copied from
+    # rgbd_lambert.yaml.
     from utils.config_utils import load_config
 
     monkeypatch.chdir(REPO)
-    diag = load_config("configs/light/rgbd_lambert_learn_all.yaml")
-    learn = load_config("configs/light/rgbd_nocos_learn_all.yaml")
+    diag = load_config(f"configs/light/rgbd_lambert_{name}.yaml")
+    learn = load_config(f"configs/light/rgbd_nocos_{name}.yaml")
     lam = load_config("configs/light/rgbd_lambert.yaml")
     assert diag["Light"]["cosine"] == lam["Light"]["cosine"]
     assert diag["LightTracking"]["pixel_weight"] == lam["LightTracking"]["pixel_weight"]
@@ -534,3 +538,20 @@ def test_spline_configs_change_only_the_angular_profile(monkeypatch, name, learn
         c["Light"].pop("schedule", None)
         c.pop("inherit_from")
     assert cfg == main
+
+
+def test_selfcal_reads_only_the_light_position_from_the_params_file(monkeypatch):
+    # D70: self-calibration mode. The params file holds only t_CL (the mount's
+    # design value); K = 1, c' guessed, spline from flat, R_CL from identity.
+    pytest.importorskip("torch")
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    cfg = load_config("configs/light/rgbd_nocos_selfcal.yaml")
+    sh = build_shader(cfg, {"t_CL_m": {"config_opencv": [0.0, -0.05, 0.0]}})
+    assert sorted(sh.learnable_params()) == [
+        "ambient.c", "angular.knot_values", "pose.R_CL", "pose.t_CL"]
+    after = {p: lp.after_keyframes for p, lp in sh.learnable_params().items()}
+    assert after == {"ambient.c": 3, "angular.knot_values": 3, "pose.R_CL": 10, "pose.t_CL": 10}
+    assert cfg["Light"]["intensity"] == {"source": "value", "value": 1.0, "learnable": False}
+    assert cfg["Light"]["angular"]["init"] == {"type": "uniform"}

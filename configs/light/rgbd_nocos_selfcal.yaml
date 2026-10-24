@@ -1,0 +1,45 @@
+# Self-calibration mode (docs/DECISIONS.md D70): the light model with ONLY the
+# light position t_CL measured. Everything else is chosen or learned in
+# MAPPING (never in tracking), combining rgbd_nocos_learn_k1.yaml (K = 1,
+# ambient ratio c' learned from a guess) and rgbd_nocos_learn_spline_flat.yaml
+# (emission profile learned as a spline from a flat start):
+#
+#   K      1, a unit choice, not learned (only c / K is observable, D65);
+#   c'     learned from the guess of rgbd_nocos_learn_k1.yaml;
+#   Phi    spline learned from Phi = 1 everywhere (no cone knowledge), Phi(0) = 1;
+#   R_CL   2 tilts learned from the NOMINAL mount "light points along the
+#          camera axis" (identity), not from the params file. Caveat: on the
+#          Replica data the estimated R_CL is within 0.01 deg of identity,
+#          so this start is nearly the answer; the evidence that the tilt is
+#          learnable is rgbd_nocos_learn_tilt_10deg.yaml (D66);
+#   t_CL   the DESIGN value of the mount (t_CL_m.config_opencv, what a ruler
+#          on the rig gives), refined with the weak prior of
+#          rgbd_nocos_learn_all.yaml (least observable parameter, D59).
+#
+# Schedule, TO CONFIRM: the spline and c' start after 3 keyframes, as the
+# spline of rgbd_nocos_learn_spline_flat.yaml (until then mapping runs with no
+# cone); both set the shading level, so the albedo should not settle on a
+# wrong c' first. The tilt and t_CL start after 10 keyframes
+# (= Training.window_size, as rgbd_nocos_learn_all.yaml), once the spline
+# has an edge: the profile is symmetric about the light axis, and a tilt
+# only shows against that edge.
+inherit_from: "configs/light/rgbd_nocos_learn_k1.yaml"
+
+Light:
+  angular:
+    # Replace the inherited learnable blender_spot block (D54 _replace); same
+    # spline as rgbd_nocos_learn_spline_flat.yaml.
+    _replace: true
+    type: spline
+    knots_deg: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+    interpolation: linear_cos
+    init: {type: uniform}
+    learn: {learnable: true, lr: 0.01, prior_weight: 0.0}
+    smoothness_weight: 0.0
+  pose:
+    t_CL: {key: t_CL_m.config_opencv}
+    R_CL: {_replace: true, source: value, value: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+           learnable: true, lr: 0.01, prior_weight: 0.0}
+  schedule:
+    - {after_keyframes: 3, unfreeze: [angular.knot_values, ambient.c]}
+    - {after_keyframes: 10, unfreeze: [pose.R_CL, pose.t_CL]}

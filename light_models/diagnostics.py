@@ -164,15 +164,12 @@ def _flatten(state):
 
 
 def log_learned_light(save_dir, frame_idx, n_keyframes, state):
-    """Learned light parameters after a keyframe's mapping (D60): console
-    line + <save_dir>/light_learned.csv. pose.R_CL is the tilt of the light
-    axis in degrees (about camera x, y)."""
+    """Learned light parameters after a keyframe's mapping (D60):
+    <save_dir>/light_learned.csv. pose.R_CL is the tilt of the light axis in
+    degrees (about camera x, y). CSV only, no console line: a spline has 50
+    values per keyframe (D69); summarize_csv_logs prints first -> middle ->
+    last at the end of the run."""
     flat = _flatten(state)
-    Log(
-        f"learned light kf {frame_idx} ({n_keyframes} keyframes): "
-        + ", ".join(f"{name}={v:.4f}" for name, v in flat),
-        tag="Light",
-    )
     if save_dir is None:
         return
     path = os.path.join(save_dir, LEARNED_CSV_NAME)
