@@ -5,7 +5,10 @@
 #
 # Each entry declares which keys of its config block it accepts:
 #   numeric - numeric parameters, each a ParamSpec block (params.py);
-#   options - non-numeric settings (e.g. lambert's normal_source).
+#   options - non-numeric settings (e.g. lambert's normal_source);
+#   nested  - {key: kind}: keys whose block is ANOTHER component of that kind,
+#             built here (with the params file) and passed as an object
+#             (e.g. the initial profile of the spline, D67).
 # Any other key in the block is an error (typos must not pass silently).
 #
 # No torch import here: config parsing stays testable without torch.
@@ -16,14 +19,18 @@ _REGISTRY = {kind: {} for kind in KINDS}
 _PLANNED = {kind: set() for kind in KINDS}
 
 
-def register(kind, name, numeric=(), options=()):
+def register(kind, name, numeric=(), options=(), nested=None):
     if kind not in _REGISTRY:
         raise ValueError(f"unknown component kind {kind!r}")
+    nested = dict(nested or {})
+    for key, sub_kind in nested.items():
+        if sub_kind not in _REGISTRY:
+            raise ValueError(f"{kind} '{name}': nested key {key!r} has unknown kind {sub_kind!r}")
 
     def deco(cls):
         if name in _REGISTRY[kind]:
             raise ValueError(f"{kind} '{name}' registered twice")
-        _REGISTRY[kind][name] = (cls, tuple(numeric), tuple(options))
+        _REGISTRY[kind][name] = (cls, tuple(numeric), tuple(options), nested)
         return cls
 
     return deco
@@ -35,7 +42,7 @@ def declare_planned(kind, *names):
 
 
 def lookup(kind, name, where):
-    """(class, numeric keys, option keys) registered for kind/name."""
+    """(class, numeric keys, option keys, nested {key: kind}) for kind/name."""
     if name in _REGISTRY[kind]:
         return _REGISTRY[kind][name]
     if name in _PLANNED[kind]:
@@ -57,12 +64,13 @@ def build_component(kind, block, where, params_data):
     if not isinstance(block, dict):
         raise TypeError(f"{where} must be a block with a 'type', got {block!r}")
     name = require_key(block, "type", where)
-    cls, numeric, options = lookup(kind, name, where)
-    extra = set(block) - {"type"} - set(numeric) - set(options)
+    cls, numeric, options, nested = lookup(kind, name, where)
+    allowed = set(numeric) | set(options) | set(nested)
+    extra = set(block) - {"type"} - allowed
     if extra:
         raise ValueError(
             f"{where}: unexpected keys {sorted(extra)} for type '{name}' "
-            f"(allowed: {sorted(set(numeric) | set(options))})"
+            f"(allowed: {sorted(allowed)})"
         )
     kwargs = {
         n: resolve_param(require_key(block, n, where), f"{where}.{n}", params_data)
@@ -70,6 +78,10 @@ def build_component(kind, block, where, params_data):
     }
     specs = dict(kwargs)
     kwargs.update({o: require_key(block, o, where) for o in options})
+    kwargs.update({
+        key: build_component(sub_kind, require_key(block, key, where), f"{where}.{key}", params_data)
+        for key, sub_kind in nested.items()
+    })
     obj = cls(**kwargs)
     # The resolved numeric ParamSpecs, so the shader can find the learnable
     # ones (light_models/learning.py, D60). Convention: a component keeps a

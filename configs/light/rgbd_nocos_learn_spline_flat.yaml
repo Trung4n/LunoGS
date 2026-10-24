@@ -1,0 +1,25 @@
+# Stage B (docs/DECISIONS.md D67): the angular profile learned as a spline
+# from a FLAT profile (Phi = 1 everywhere): no knowledge of the cone at all.
+# On the synthetic wall it recovers the Blender profile to 0.017.
+# Starting values, TO CONFIRM: lr 0.01 per mapping iteration (as the
+# synthetic test); after_keyframes 3: start early, since until then mapping
+# runs with no cone (the uniform ablation, D55, tracked badly), but not
+# before a few views exist to separate the profile from the albedo;
+# smoothness_weight 0 (did not matter on the synthetic wall).
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  angular:
+    # Replace the inherited blender_spot block (D54 _replace).
+    _replace: true
+    type: spline
+    # 1 deg knots, 0..50 deg (the image corners are ~50 deg off the light
+    # axis). D67: 4 deg knots miss the ~6 deg wide Blender cone edge by up to
+    # 0.17 and bias the learning; 1 deg keeps the error at 0.02.
+    knots_deg: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+    interpolation: linear_cos
+    init: {type: uniform}
+    learn: {learnable: true, lr: 0.01, prior_weight: 0.0}
+    smoothness_weight: 0.0
+  schedule:
+    - {after_keyframes: 3, unfreeze: [angular.knot_values]}

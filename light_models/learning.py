@@ -36,6 +36,12 @@ class LearnableParam:
     prior_weight: float
     after_keyframes: int = None  # from Light.schedule
     check: object = None  # zero-argument callable raising on an invalid value
+    # Zero-argument callable restoring the parameter's constraints after a
+    # step (projected gradient, e.g. the monotone spline, D67), or None.
+    project: object = None
+    # Zero-argument callable returning an extra penalty (tensor) of the
+    # parameter, added while it is active (e.g. spline smoothness), or None.
+    regularizer: object = None
 
 
 def make_learnable(path, tensor, spec, check=None):
@@ -110,12 +116,17 @@ class LightLearner:
         self.optimizer.zero_grad(set_to_none=True)
 
     def prior_loss(self, n_keyframes):
-        """Penalty of the active parameters with prior_weight > 0, or None."""
-        terms = [
-            p.prior_weight * ((p.tensor - p.start) ** 2).sum()
-            for path, p in self.params.items()
-            if path in self.active(n_keyframes) and p.prior_weight > 0
-        ]
+        """Penalties of the active parameters: the prior (prior_weight > 0)
+        and the parameter's own regularizer if any; None when there is none."""
+        active = set(self.active(n_keyframes))
+        terms = []
+        for path, p in self.params.items():
+            if path not in active:
+                continue
+            if p.prior_weight > 0:
+                terms.append(p.prior_weight * ((p.tensor - p.start) ** 2).sum())
+            if p.regularizer is not None:
+                terms.append(p.regularizer())
         return sum(terms) if terms else None
 
     def step(self, n_keyframes):
@@ -128,7 +139,10 @@ class LightLearner:
         if active:
             self.optimizer.step()
             for path in active:
-                check = self.params[path].check
-                if check is not None:
-                    check()
+                p = self.params[path]
+                if p.project is not None:
+                    with torch.no_grad():
+                        p.project()
+                if p.check is not None:
+                    p.check()
         self.zero_grad()

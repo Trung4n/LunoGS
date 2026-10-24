@@ -206,6 +206,10 @@ def test_light_config_set():
         "rgbd_nocos_learn_half_angle_p6deg.yaml",
         "rgbd_nocos_learn_tilt_10deg.yaml",
         "rgbd_lambert_learn_all.yaml",
+        "rgbd_nocos_spline.yaml",
+        "rgbd_nocos_learn_spline_flat.yaml",
+        "rgbd_nocos_learn_spline_wide.yaml",
+        "rgbd_nocos_learn_spline_narrow.yaml",
         "verify_shading.yaml",
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
@@ -505,3 +509,28 @@ def test_lambert_learn_all_is_learn_all_plus_the_lambert_of_rgbd_lambert(monkeyp
         cfg["LightTracking"].pop("pixel_weight")
         cfg.pop("inherit_from")
     assert diag == learn
+
+
+@pytest.mark.parametrize("name, learned", [
+    ("rgbd_nocos_spline", []),
+    ("rgbd_nocos_learn_spline_flat", ["angular.knot_values"]),
+    ("rgbd_nocos_learn_spline_wide", ["angular.knot_values"]),
+    ("rgbd_nocos_learn_spline_narrow", ["angular.knot_values"]),
+])
+def test_spline_configs_change_only_the_angular_profile(monkeypatch, name, learned):
+    # D67: rgbd_nocos.yaml with the angular block replaced by a spline (and a
+    # schedule when it learns); 1 deg knots from 0 to 50 deg.
+    pytest.importorskip("torch")
+    from utils.config_utils import load_config
+
+    monkeypatch.chdir(REPO)
+    cfg = load_config(f"configs/light/{name}.yaml")
+    sh = build_shader(cfg, _FAKE_PARAMS)
+    assert sorted(sh.learnable_params()) == learned
+    assert cfg["Light"]["angular"]["knots_deg"] == list(range(0, 51))
+    main = load_config("configs/light/rgbd_nocos.yaml")
+    for c in (cfg, main):
+        c["Light"].pop("angular")
+        c["Light"].pop("schedule", None)
+        c.pop("inherit_from")
+    assert cfg == main

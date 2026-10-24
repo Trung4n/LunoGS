@@ -109,6 +109,11 @@ class ColocatedShader:
                 if spec.learnable:
                     add(f"{prefix}.{name}", getattr(comp, name), spec,
                         getattr(comp, "check_values", None))
+            # Learnable tensors that are not ParamSpecs (e.g. the spline's
+            # knot values, D67): the component builds their LearnableParam.
+            extra = getattr(comp, "learnable_extra", None)
+            if extra is not None:
+                learnable.update(extra(prefix))
         read_schedule(light_cfg, learnable)
         self._learnable = learnable
 
