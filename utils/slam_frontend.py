@@ -12,6 +12,7 @@ from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
+from utils.run_recorder import open_recorder
 from light_models.diagnostics import log_pixel_usage
 from utils.slam_utils import get_loss_tracking, get_median_depth, pixel_usage_stats
 
@@ -514,6 +515,8 @@ class FrontEnd(mp.Process):
             # Tracking never optimizes light parameters (CLAUDE.md section
             # 6): they are constants here, updated only from the backend.
             self.shader.set_learning(False)
+        # Optional recording for offline replay videos (D76); None = off.
+        self.recorder = open_recorder(self.config, self.dataset, self.shader, self.background)
         cur_frame_idx = 0
         # Same intrinsics for every frame: built once, shared by all Cameras.
         projection_matrix = build_projection_matrix(
@@ -561,6 +564,10 @@ class FrontEnd(mp.Process):
                         save_gaussians(
                             self.gaussians, self.save_dir, "final", final=True
                         )
+                    if self.recorder is not None:
+                        self.recorder.finish(
+                            self.cameras, self.kf_indices, self.gaussians, cur_frame_idx - 1
+                        )
                     break
 
                 # Wait states (sleep, then loop back to check the queues):
@@ -592,6 +599,8 @@ class FrontEnd(mp.Process):
                 # restarts the system instead of being tracked.
                 if self.reset:
                     self.initialize(cur_frame_idx, viewpoint)
+                    if self.recorder is not None:
+                        self.recorder.frame(cur_frame_idx, viewpoint, None, len(self.kf_indices))
                     self.current_window.append(cur_frame_idx)
                     cur_frame_idx += 1
                     continue
@@ -604,6 +613,9 @@ class FrontEnd(mp.Process):
 
                 # Tracking
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
+                if self.recorder is not None:
+                    # Before cleanup() frees the frame's images.
+                    self.recorder.frame(cur_frame_idx, viewpoint, render_pkg, len(self.kf_indices))
 
                 # GUI: current frame, window keyframes and a full copy of the
                 # map snapshot (a deep copy on every frame).
@@ -724,11 +736,15 @@ class FrontEnd(mp.Process):
                 elif data[0] == "keyframe":
                     self.sync_backend(data)
                     self.requested_keyframe -= 1
+                    if self.recorder is not None:
+                        self.recorder.map_snapshot(len(self.kf_indices), cur_frame_idx, self.gaussians)
 
                 # Answer to request_init.
                 elif data[0] == "init":
                     self.sync_backend(data)
                     self.requested_init = False
+                    if self.recorder is not None:
+                        self.recorder.map_snapshot(len(self.kf_indices), cur_frame_idx, self.gaussians)
 
                 # Never sent: the backend only emits the three tags above.
                 elif data[0] == "stop":

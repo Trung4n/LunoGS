@@ -112,3 +112,66 @@ def test_depth_only_is_the_baseline_with_alpha_zero(monkeypatch):
         c.pop("inherit_from")
     assert a == b
     assert "Light" not in a or not a["Light"].get("enabled", False)
+
+
+# ---- heavy level: correlated noise and block dropout (D75) ---------------------
+
+HEAVY = {**BLOCK, "correlated": {"cell_px": 8, "a": 0.01, "b": 0.0, "z0": 0.4},
+         "dropout": {"cell_px": 4, "frac": 0.2}}
+
+
+def test_optional_parts_absent_keep_the_light_level_identical():
+    # The white noise is drawn first: adding the optional parts must not
+    # change it, and their absence parses to None.
+    p = _params()
+    assert p["correlated"] is None and p["dropout"] is None
+    depth = np.full((60, 80), 2.0)
+    light = apply_depth_noise(depth, p, 5)
+    only_cor = read_depth_noise({"depth_noise": {**BLOCK, "correlated": {"cell_px": 8, "a": 0.0, "b": 0.0, "z0": 0.4}}})
+    np.testing.assert_array_equal(apply_depth_noise(depth, only_cor, 5), light)
+
+
+@pytest.mark.parametrize("over, error", [
+    ({"correlated": {"cell_px": 0, "a": 0.01, "b": 0.0, "z0": 0.4}}, ValueError),
+    ({"correlated": {"cell_px": 8, "a": 0.01, "b": 0.0}}, KeyError),
+    ({"dropout": {"cell_px": 4, "frac": 1.0}}, ValueError),
+    ({"dropout": {"cell_px": 4}}, KeyError),
+    ({"dropout": {"cell_px": 4, "frac": 0.1, "x": 1}}, ValueError),
+])
+def test_optional_parts_validated(over, error):
+    with pytest.raises(error):
+        _params(**over)
+
+
+def test_correlated_field_has_unit_variance_and_is_smooth():
+    from utils.depth_noise import correlated_field
+
+    f = correlated_field(np.random.default_rng(0), (400, 400), 16)
+    assert np.std(f) == pytest.approx(1.0, rel=0.1)
+    # neighbouring pixels nearly equal, pixels far apart independent
+    assert np.corrcoef(f[:, :-1].ravel(), f[:, 1:].ravel())[0, 1] > 0.9
+    assert abs(np.corrcoef(f[:, :-40].ravel(), f[:, 40:].ravel())[0, 1]) < 0.2
+
+
+def test_block_dropout_removes_whole_blocks_at_the_given_rate():
+    p = read_depth_noise({"depth_noise": {**HEAVY, "edge": {"window_px": 1, "rel_jump": 0.5},
+                                          "correlated": {"cell_px": 8, "a": 0.0, "b": 0.0, "z0": 0.4}}})
+    out = apply_depth_noise(np.full((400, 400), 2.0), p, 3)
+    lost = out == 0
+    assert lost.mean() == pytest.approx(0.2, abs=0.03)
+    blocks = lost.reshape(100, 4, 100, 4)
+    assert (blocks.all(axis=(1, 3)) == blocks.any(axis=(1, 3))).all()  # all-or-nothing per block
+
+
+def test_heavy_configs_share_one_block(monkeypatch):
+    monkeypatch.chdir(REPO)
+    a = _load("configs/rgbd/replica/depth_only_noise_heavy.yaml")
+    b = _load("configs/light/rgbd_nocos_depth_noise_heavy.yaml")
+    assert a["Dataset"]["depth_noise"] == b["Dataset"]["depth_noise"]
+    p = read_depth_noise(a["Dataset"])
+    assert p["correlated"] is not None and p["dropout"] is not None
+    for noisy, clean in [(a, _load("configs/rgbd/replica/depth_only.yaml")),
+                         (b, _load("configs/light/rgbd_nocos.yaml"))]:
+        noisy["Dataset"].pop("depth_noise")
+        noisy.pop("inherit_from"), clean.pop("inherit_from", None)
+        assert noisy == clean

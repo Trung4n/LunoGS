@@ -9,6 +9,18 @@ Results:
   # frozen) before the after_opt rendering metrics. Does not change the ATE.
   # slam.py --skip_color_refinement sets it to False (D61).
   color_refinement: True
+  # Recording of the run for offline replay videos (utils/run_recorder.py,
+  # tools/viz/render_replay.py, docs/DECISIONS.md D76). Off = original MonoGS;
+  # slam.py --record switches it on. Logging only, never read by SLAM.
+  record:
+    enabled: False
+    # Pose of EVERY frame is written; the images (observed, rendered,
+    # albedo, depth) every frame_every frames.
+    frame_every: 5
+    # Map snapshot every n keyframes (plus the initial and the final map).
+    map_every_keyframes: 10
+    # Width of the stored images in pixels (aspect ratio kept).
+    image_width: 320
   use_wandb: False
   # Keyframe trajectory analysis printed at the end of each run
   # (utils/trajectory_analysis.py): sliding-window size for the local

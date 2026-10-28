@@ -1,0 +1,24 @@
+# The main model (rgbd_nocos.yaml) on HEAVILY degraded sensor depth
+# (docs/DECISIONS.md D75). Same block as
+# configs/rgbd/replica/depth_only_noise_heavy.yaml (tested).
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Dataset:
+  # HEAVY degradation of the SENSOR depth (docs/DECISIONS.md D75,
+  # utils/depth_noise.py): a pessimistic stress level, after the Kinect-v1
+  # level of D72 changed nothing. Values TO CONFIRM:
+  #   axial_sigma: 3x the Kinect v1 model of D72 (18 mm at 2 m, 42 mm at 3 m);
+  #   correlated: the same magnitude again, but smooth over ~16 px cells, i.e.
+  #     a per-frame wavy bias the depth loss cannot average out;
+  #   dropout: 10 % of 8x8 blocks lost (holes as on dark or shiny surfaces);
+  #   edge: pixels within 3 px of a depth jump > 5 % of z lost;
+  #   max_range_m 3.5: practical Kinect v1 range.
+  # Measured on office0 frames 0..1600: 12-29 % of the pixels lost, median
+  # error 17-20 mm, p95 65-91 mm, mean error of a 30x30 px patch -11..+21 mm.
+  depth_noise:
+    seed: 0
+    max_range_m: 3.5
+    axial_sigma: {a: 0.0036, b: 0.0057, z0: 0.4}
+    edge: {window_px: 3, rel_jump: 0.05}
+    correlated: {cell_px: 16, a: 0.0036, b: 0.0057, z0: 0.4}
+    dropout: {cell_px: 8, frac: 0.1}

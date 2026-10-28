@@ -18,6 +18,21 @@
 #       edge: {window_px: <k>, rel_jump: <r>}
 #                                   # pixel -> 0 if (max - min) of the clean
 #                                   # depth over its (2k+1)^2 window > r * z
+#       correlated: {cell_px: <n>, a: <m>, b: <1/m>, z0: <m>}      # OPTIONAL
+#                                   # spatially correlated error: one Gaussian
+#                                   # value per n x n cell, bilinearly
+#                                   # interpolated (rescaled to unit variance),
+#                                   # times sigma_c(z) = a + b (z - z0)^2; a
+#                                   # smooth "wavy" depth bias inside a frame,
+#                                   # which the depth loss cannot average out
+#       dropout: {cell_px: <n>, frac: <p>}                       # OPTIONAL
+#                                   # n x n blocks lost with probability p
+#                                   # (holes like those on dark or shiny
+#                                   # surfaces, not isolated pixels)
+#
+# The two optional parts were added for the heavier level (D75); absent = not
+# applied, so the light level of D72 is unchanged (its white noise is drawn
+# first from the same generator, the extra parts after it).
 #
 # The noise of a frame depends only on (seed, frame index), so every config
 # of the experiment, and every re-read of the same frame (tracking, keyframe
@@ -27,7 +42,7 @@ import numpy as np
 
 from utils.config_utils import require_key
 
-_KEYS = {"seed", "max_range_m", "axial_sigma", "edge"}
+_KEYS = {"seed", "max_range_m", "axial_sigma", "edge", "correlated", "dropout"}
 
 
 def _number(v, where, positive=False):
@@ -48,6 +63,13 @@ def _block(parent, key, where, keys):
     return b
 
 
+def _cell(block, where):
+    n = require_key(block, "cell_px", where)
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError(f"{where}.cell_px must be an integer >= 1, got {n!r}")
+    return n
+
+
 def read_depth_noise(dataset_cfg):
     """Parsed Dataset.depth_noise as a plain dict, or None when absent."""
     if "depth_noise" not in dataset_cfg:
@@ -63,7 +85,7 @@ def read_depth_noise(dataset_cfg):
     window = require_key(edge, "window_px", f"{where}.edge")
     if isinstance(window, bool) or not isinstance(window, int) or window < 1:
         raise ValueError(f"{where}.edge.window_px must be an integer >= 1, got {window!r}")
-    return {
+    out = {
         "seed": seed,
         "max_range_m": _number(require_key(block, "max_range_m", where), f"{where}.max_range_m", positive=True),
         "a": _number(require_key(sig, "a", f"{where}.axial_sigma"), f"{where}.axial_sigma.a"),
@@ -72,7 +94,22 @@ def read_depth_noise(dataset_cfg):
         "window_px": window,
         "rel_jump": _number(require_key(edge, "rel_jump", f"{where}.edge"), f"{where}.edge.rel_jump",
                             positive=True),
+        "correlated": None,
+        "dropout": None,
     }
+    if "correlated" in block:
+        w = f"{where}.correlated"
+        cor = _block(block, "correlated", where, ("cell_px", "a", "b", "z0"))
+        out["correlated"] = {"cell_px": _cell(cor, w),
+                             **{k: _number(require_key(cor, k, w), f"{w}.{k}") for k in ("a", "b", "z0")}}
+    if "dropout" in block:
+        w = f"{where}.dropout"
+        dro = _block(block, "dropout", where, ("cell_px", "frac"))
+        frac = _number(require_key(dro, "frac", w), f"{w}.frac")
+        if frac >= 1:
+            raise ValueError(f"{w}.frac must be < 1, got {frac!r}")
+        out["dropout"] = {"cell_px": _cell(dro, w), "frac": frac}
+    return out
 
 
 def edge_mask(depth, window_px, rel_jump):
@@ -93,6 +130,30 @@ def edge_mask(depth, window_px, rel_jump):
     return (hi - lo) > rel_jump * d
 
 
+def correlated_field(rng, shape, cell_px):
+    """Unit-variance Gaussian field, correlated over ~cell_px pixels: values on
+    a coarse grid, bilinearly interpolated, divided by the interpolation's
+    standard deviation so every pixel has variance 1."""
+    h, w = shape
+    gy, gx = h // cell_px + 2, w // cell_px + 2
+    grid = rng.standard_normal((gy, gx))
+    ty = np.arange(h) / cell_px
+    tx = np.arange(w) / cell_px
+    iy, fy = np.floor(ty).astype(int), ty - np.floor(ty)
+    ix, fx = np.floor(tx).astype(int), tx - np.floor(tx)
+    rows = grid[iy] * (1 - fy)[:, None] + grid[iy + 1] * fy[:, None]
+    field = rows[:, ix] * (1 - fx)[None] + rows[:, ix + 1] * fx[None]
+    std = np.sqrt(((1 - fy) ** 2 + fy ** 2)[:, None] * ((1 - fx) ** 2 + fx ** 2)[None])
+    return field / std
+
+
+def block_dropout(rng, shape, cell_px, frac):
+    """True on the n x n blocks that are lost."""
+    h, w = shape
+    lost = rng.random((h // cell_px + 1, w // cell_px + 1)) < frac
+    return lost[np.arange(h)[:, None] // cell_px, np.arange(w)[None] // cell_px]
+
+
 def apply_depth_noise(depth, params, frame_idx):
     """Degraded copy of a metric depth image (H, W; 0 = no reading)."""
     clean = np.asarray(depth, dtype=np.float64)
@@ -102,6 +163,13 @@ def apply_depth_noise(depth, params, frame_idx):
     rng = np.random.default_rng([params["seed"], int(frame_idx)])
     sigma = params["a"] + params["b"] * (clean - params["z0"]) ** 2
     noisy = clean + rng.standard_normal(clean.shape) * sigma
+    cor = params["correlated"]
+    if cor is not None:
+        sigma_c = cor["a"] + cor["b"] * (clean - cor["z0"]) ** 2
+        noisy += correlated_field(rng, clean.shape, cor["cell_px"]) * sigma_c
+    dro = params["dropout"]
+    if dro is not None:
+        drop |= block_dropout(rng, clean.shape, dro["cell_px"], dro["frac"])
     drop |= noisy <= 0
     noisy[drop] = 0.0
     return noisy

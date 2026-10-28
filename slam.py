@@ -400,6 +400,14 @@ if __name__ == "__main__":
         "after) and the color refinement; ATE and trajectory analysis only",
     )
 
+    # Recording for offline replay videos (D76); needs saved results.
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Record poses, images and map snapshots under <save_dir>/record/ "
+        "(Results.record) for tools/viz/render_replay.py",
+    )
+
     args = parser.parse_args(sys.argv[1:])
 
     mp.set_start_method("spawn")
@@ -436,6 +444,11 @@ if __name__ == "__main__":
     if args.skip_render_eval:
         config["Results"]["eval_rendering"] = False
         Log("\teval_rendering=False (--skip_render_eval: ATE only)")
+    if args.record:
+        # Recorded in the run's config.yml; the other Results.record keys
+        # come from the config.
+        config["Results"]["record"]["enabled"] = True
+        Log("\trecord.enabled=True")
 
     if config["Results"]["save_results"]:
         mkdir_p(config["Results"]["save_dir"])
