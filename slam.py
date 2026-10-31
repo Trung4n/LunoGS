@@ -294,6 +294,9 @@ class SLAM:
                         gaussians = data[1]
                         self.gaussians = gaussians
                         break
+                if self.frontend.recorder is not None:
+                    # The refined map next to the online one (D81).
+                    self.frontend.recorder.refined_map(N_frames - 1, len(kf_indices), self.gaussians)
 
                 rendering_result = eval_rendering(
                     self.frontend.cameras,

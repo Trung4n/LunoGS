@@ -115,6 +115,16 @@ def _record(tmp_path, with_albedo=True, n_frames=21):
     return save_dir
 
 
+def test_refined_map_is_written_after_finish(tmp_path):
+    rec = RunRecorder(CFG, str(tmp_path / "run"), intrinsics={"fx": 30.0, "fy": 30.0, "cx": W / 2, "cy": H / 2,
+                                                             "width": W, "height": H},
+                      map_color="linear_albedo", background=[0.0, 0.0, 0.0])
+    rec.finish({}, [], _gaussians(50), 0)
+    rec.refined_map(20, 7, _gaussians(60))   # slam.py calls it after the color refinement (D81)
+    with np.load(tmp_path / "run" / "record" / "maps" / "final_refined.npz") as z:
+        assert len(z["xyz"]) == 60 and int(z["frame_idx"]) == 20 and int(z["n_keyframes"]) == 7
+
+
 def test_recording_layout(tmp_path):
     run = _record(tmp_path)
     root = run / "record"

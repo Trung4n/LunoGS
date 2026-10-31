@@ -170,6 +170,11 @@ class RunRecorder:
         self._maps.add(n_keyframes)
         self._save_map(f"kf{n_keyframes:05d}", frame_idx, n_keyframes, gaussians)
 
+    def refined_map(self, frame_idx, n_keyframes, gaussians):
+        """The map after slam.py's offline color refinement (poses fixed):
+        maps/final_refined.npz, next to the online final.npz."""
+        self._save_map("final_refined", frame_idx, n_keyframes, gaussians)
+
     def _save_map(self, tag, frame_idx, n_keyframes, gaussians):
         def arr(t, dtype):
             return t.detach().float().cpu().numpy().astype(dtype)

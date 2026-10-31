@@ -1,6 +1,7 @@
 """Map quality of a recorded run (docs/DECISIONS.md D79).
 
-Renders the FINAL map of a recording (slam.py --record, record/maps/final.npz)
+Renders the FINAL map of a recording (slam.py --record, record/maps/final.npz,
+or --map final_refined: after the offline color refinement)
 at the final estimated pose of every evaluation frame (every `--interval`
 frames, keyframes skipped, as MonoGS's eval_rendering) and compares:
 
@@ -100,6 +101,11 @@ def cone_mask(depth, intr, t_cl, axis, half_angle_deg):
     p = np.stack([x, y, depth], axis=-1) - np.asarray(t_cl, np.float64)
     cos = (p @ np.asarray(axis, np.float64)) / np.maximum(np.linalg.norm(p, axis=-1), 1e-9)
     return (depth > 0) & (cos >= math.cos(math.radians(half_angle_deg)))
+
+
+def saturated(obs, sat_8bit):
+    """(H,W) bool: any channel of the observed 8-bit image >= sat_8bit."""
+    return (np.rint(np.asarray(obs) * 255.0) >= sat_8bit).any(-1)
 
 
 def eval_frames(n_frames, keyframes, interval):
@@ -225,7 +231,7 @@ def run(args):
     axis = np.asarray(params["R_CL"]["estimated"], np.float64) @ np.array([0.0, 0.0, 1.0])
     half_angle = params["cone"]["half_angle_deg_estimated"]
 
-    with np.load(os.path.join(rec, "maps", "final.npz")) as z:
+    with np.load(os.path.join(rec, "maps", args.map + ".npz")) as z:
         snap = {k: z[k] for k in z.files}
     poses, kfs = read_final(rec)
     frames = eval_frames(len(poses), kfs, args.interval)
@@ -259,10 +265,14 @@ def run(args):
         with torch.no_grad():
             s = float(ssim_fn(tt(image), tt(obs)))
             lp = float(lpips(tt(image), tt(obs)))
+        sat = saturated(obs, args.sat_8bit)
         rows.append({"frame": i, "lit_psnr": psnr(image, obs), "lit_ssim": s, "lit_lpips": lp,
                      "lit_psnr_in_cone": psnr(image, obs, cone & covered),
                      "lit_psnr_out_cone": psnr(image, obs, ~cone & (depth > 0) & covered),
-                     "coverage": float(covered.mean()), "cone_fraction": float(cone.mean())})
+                     "lit_psnr_cone_unsat": psnr(image, obs, cone & ~sat & covered),
+                     "lit_psnr_sat": psnr(image, obs, sat & covered),
+                     "coverage": float(covered.mean()), "cone_fraction": float(cone.mean()),
+                     "sat_fraction": float(sat.mean())})
         if n % 50 == 0:
             print(f"  pass 1: frame {i} ({n + 1}/{len(frames)})", flush=True)
 
@@ -282,6 +292,14 @@ def run(args):
                 row[f"{name}_ssim"] = float(ssim_fn(tt(pred_m), tt(ref_m)))
                 row[f"{name}_lpips"] = float(lpips(tt(pred_m), tt(ref_m)))
             row[f"{name}_psnr"] = psnr(pred, ref, covered)
+        # albedo error by pixel class (where the map colour comes from)
+        cone = cone_mask(depth, intr, t_cl, axis, half_angle)
+        sat = saturated(obs, args.sat_8bit)
+        pred = linear_to_srgb(np.clip(colour * g_alb, 0, 1))
+        ref = linear_to_srgb(alb_gt)
+        row["albedo_psnr_cone_unsat"] = psnr(pred, ref, cone & ~sat & covered)
+        row["albedo_psnr_out_cone"] = psnr(pred, ref, ~cone & (depth > 0) & covered)
+        row["albedo_psnr_sat"] = psnr(pred, ref, sat & covered)
         if i in figure_frames:
             save_figure(args.out, i, obs, image, linear_to_srgb(np.clip(colour * g_alb, 0, 1)),
                         linear_to_srgb(alb_gt), linear_to_srgb(np.clip(colour * g_even, 0, 1)),
@@ -297,7 +315,11 @@ def run(args):
     mean = lambda k: float(np.nanmean([r[k] for r in rows]))  # noqa: E731
     metrics = {
         "label": args.label or meta["run"], "run": meta["run"], "map_color": meta["map_color"],
-        "frames": len(rows), "interval": args.interval, "gaussians": int(len(snap["xyz"])),
+        # inputs, so tools/analysis/diagnose_map.py --metrics can find them again
+        "record": os.path.abspath(rec), "dataset": os.path.abspath(args.dataset), "config": args.config,
+        "renders": os.path.abspath(args.renders),
+        "light_csv": os.path.abspath(args.light_csv) if args.light_csv else None,
+        "map": args.map, "frames": len(rows), "interval": args.interval, "gaussians": int(len(snap["xyz"])),
         "gain_albedo": g_alb.tolist(), "gain_even": g_even.tolist(),
         **{k: mean(k) for k in rows[0] if k != "frame"},
     }
@@ -329,19 +351,32 @@ COLUMNS = [("lit_psnr", "lit PSNR"), ("lit_psnr_in_cone", "in cone"), ("lit_psnr
            ("lit_ssim", "lit SSIM"), ("lit_lpips", "lit LPIPS"), ("albedo_psnr", "albedo PSNR"),
            ("albedo_ssim", "albedo SSIM"), ("even_psnr", "even PSNR"), ("even_ssim", "even SSIM"),
            ("coverage", "coverage")]
+# --breakdown: where the error is, by pixel class (D81)
+BREAKDOWN = [("lit_psnr_cone_unsat", "lit, cone unsat."), ("lit_psnr_sat", "lit, saturated"),
+             ("lit_psnr_out_cone", "lit, out of cone"), ("albedo_psnr_cone_unsat", "albedo, cone unsat."),
+             ("albedo_psnr_sat", "albedo, saturated"), ("albedo_psnr_out_cone", "albedo, out of cone"),
+             ("sat_fraction", "saturated px"), ("gaussians", "Gaussians")]
 
 
-def table(paths):
-    """Markdown table of several metrics.json."""
+def table(paths, columns=COLUMNS):
+    """Markdown table of several metrics.json (a missing value prints as -)."""
     rows = []
     for p in paths:
         with open(p, encoding="utf-8") as f:
             rows.append(json.load(f))
-    head = "| run | " + " | ".join(name for _, name in COLUMNS) + " |"
-    lines = [head, "|" + "---|" * (len(COLUMNS) + 1)]
+    def cell(m, k):
+        if k not in m:
+            return "-"
+        if k == "gaussians":
+            return f"{m[k] / 1000:.1f} k"
+        if k == "sat_fraction":
+            return f"{100 * m[k]:.1f} %"
+        return f"{m[k]:.3f}" if "ssim" in k or "lpips" in k or k == "coverage" else f"{m[k]:.2f}"
+
+    head = "| run | " + " | ".join(name for _, name in columns) + " |"
+    lines = [head, "|" + "---|" * (len(columns) + 1)]
     for m in rows:
-        lines.append(f"| {m['label']} | " + " | ".join(
-            f"{m[k]:.3f}" if "ssim" in k or "lpips" in k or k == "coverage" else f"{m[k]:.2f}" for k, _ in COLUMNS) + " |")
+        lines.append(f"| {m['label']} | " + " | ".join(cell(m, k) for k, _ in columns) + " |")
     return "\n".join(lines)
 
 
@@ -358,18 +393,24 @@ def main(argv=None):
                    help="light_params.json for the cone mask (default: <dataset>/light_params.json; give the lit "
                    "sequence's for a run on the even sequence)")
     r.add_argument("--out", required=True)
+    r.add_argument("--map", default="final", choices=["final", "final_refined"],
+                   help="final: the online map; final_refined: after the offline color refinement (D81)")
     r.add_argument("--label", default=None)
     r.add_argument("--interval", type=int, default=5, help="as MonoGS eval_rendering")
     r.add_argument("--min_opacity", type=float, default=0.5, help="rendered opacity for a pixel to count")
+    r.add_argument("--sat_8bit", type=int, required=True,
+                   help="observed pixel saturated if any channel >= this (as LightTracking.saturation_mask)")
     r.add_argument("--max_frames", type=int, default=None)
     r.add_argument("--figure_frames", type=int, nargs="*", default=[500, 1000, 1500])
     t = sub.add_parser("table", help="markdown table of metrics.json files")
     t.add_argument("metrics", nargs="+")
+    t.add_argument("--breakdown", action="store_true", help="error by pixel class instead of the main table")
     args = ap.parse_args(argv)
     if args.cmd == "run":
         run(args)
     else:
-        print(table([p for g in args.metrics for p in sorted(glob.glob(g))]))
+        print(table([p for g in args.metrics for p in sorted(glob.glob(g))],
+                    BREAKDOWN if args.breakdown else COLUMNS))
 
 
 if __name__ == "__main__":

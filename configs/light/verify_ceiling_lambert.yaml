@@ -1,0 +1,12 @@
+# Ceiling of the light model with the n . l term (docs/DECISIONS.md D81):
+# the main model (rgbd_nocos.yaml, estimated light values) plus lambert with
+# the GROUND-TRUTH normals of the verification bundle. Used only by
+# tools/verify/model_ceiling.py next to rgbd_nocos.yaml, so the two differ
+# only in the n . l term.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+Light:
+  cosine:
+    type: lambert
+    normal_source: {type: gbuffer}
+    warmup_keyframes: 0

@@ -11,10 +11,11 @@
 # Two stages per keyframe, so the source of the excess can be told apart:
 #   new - the Gaussians just created for this keyframe (Light.init_albedo);
 #   map - every Gaussian after this keyframe's mapping.
-# Printed with Log (no square brackets in the message: Log uses rich, which
-# would swallow "[new]" / "[map]" as markup) and, when the run saves
-# results, appended to
-# <save_dir>/albedo_stats.csv.
+# Appended to <save_dir>/albedo_stats.csv when the run saves results; the
+# console line (Log; no square brackets in the message: Log uses rich, which
+# would swallow "[new]" / "[map]" as markup) only when it does not, so the
+# numbers are never lost. Two lines per keyframe made the log thousands of
+# lines long (D82); summarize_csv_logs prints the last map stage at the end.
 #
 # No torch import: only tensor methods of the input are used.
 
@@ -56,20 +57,20 @@ def albedo_stats(albedo):
 
 
 def log_albedo_stats(save_dir, frame_idx, stage, albedo):
-    """Logs albedo_stats for one (keyframe, stage). save_dir None = no file
-    (Results.save_results: false); the console line is always printed."""
+    """Logs albedo_stats for one (keyframe, stage): the CSV row, or the
+    console line when save_dir is None (Results.save_results: false)."""
     stats = albedo_stats(albedo.detach())
     row = {"frame_idx": frame_idx, "stage": stage, **stats}
-    if stats["n_gaussians"] == 0:
-        Log(f"albedo stage={stage} kf {frame_idx}: no Gaussians", tag="Light")
-    else:
-        Log(
-            f"albedo stage={stage} kf {frame_idx}: "
-            f"{stats['frac_any_gt1']:.2%} of {stats['n_gaussians']} Gaussians > 1 "
-            f"(max {stats['max']:.3f}, mean {stats['mean']:.3f})",
-            tag="Light",
-        )
     if save_dir is None:
+        if stats["n_gaussians"] == 0:
+            Log(f"albedo stage={stage} kf {frame_idx}: no Gaussians", tag="Light")
+        else:
+            Log(
+                f"albedo stage={stage} kf {frame_idx}: "
+                f"{stats['frac_any_gt1']:.2%} of {stats['n_gaussians']} Gaussians > 1 "
+                f"(max {stats['max']:.3f}, mean {stats['mean']:.3f})",
+                tag="Light",
+            )
         return
     path = os.path.join(save_dir, CSV_NAME)
     write_header = not os.path.exists(path)
@@ -90,16 +91,17 @@ def log_exposure(save_dir, frame_idx, stage, viewpoint):
     Why: with a co-located light the affine term can absorb the brightness
     change caused by the moving lamp (docs/DECISIONS.md D6, step 4.3). The
     stages mirror the albedo log: `new` = value tracked by the frontend when
-    the keyframe arrives, `map` = after this keyframe's mapping.
+    the keyframe arrives, `map` = after this keyframe's mapping. CSV row, or
+    the console line when save_dir is None (D82).
     """
     a = float(viewpoint.exposure_a.detach().item())
     b = float(viewpoint.exposure_b.detach().item())
     gain = math.exp(a)
-    Log(
-        f"exposure stage={stage} kf {frame_idx}: a={a:+.4f} (gain {gain:.4f}) b={b:+.4f}",
-        tag="Light",
-    )
     if save_dir is None:
+        Log(
+            f"exposure stage={stage} kf {frame_idx}: a={a:+.4f} (gain {gain:.4f}) b={b:+.4f}",
+            tag="Light",
+        )
         return
     row = {"frame_idx": frame_idx, "stage": stage, "exposure_a": a,
            "exposure_b": b, "gain_exp_a": gain}

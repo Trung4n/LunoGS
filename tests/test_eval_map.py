@@ -79,3 +79,17 @@ def test_table_formats_runs(tmp_path):
     (tmp_path / "metrics.json").write_text(json.dumps(m))
     out = em.table([str(tmp_path / "metrics.json")])
     assert out.splitlines()[0].startswith("| run | lit PSNR") and "| nocos | 0.50 |" in out
+
+
+def test_saturated_is_on_the_8bit_image():
+    obs = np.zeros((2, 2, 3))
+    obs[0, 0] = [250 / 255, 0, 0]   # one channel at the threshold
+    obs[0, 1] = [249 / 255] * 3     # just below in every channel
+    assert em.saturated(obs, 250).tolist() == [[True, False], [False, False]]
+
+
+def test_breakdown_table_marks_missing_values(tmp_path):
+    m = {"label": "old run", "lit_psnr_out_cone": 30.0, "gaussians": 44613, "sat_fraction": 0.045}
+    (tmp_path / "metrics.json").write_text(json.dumps(m))
+    out = em.table([str(tmp_path / "metrics.json")], em.BREAKDOWN)
+    assert "| old run | - | - | 30.00 |" in out and "| 4.5 % | 44.6 k |" in out

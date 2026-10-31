@@ -218,6 +218,7 @@ def test_light_config_set():
         "verify_roundtrip.yaml",
         "verify_tracking.yaml",
         "verify_reparam.yaml",
+        "verify_ceiling_lambert.yaml",
     }
 
 

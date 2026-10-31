@@ -43,6 +43,24 @@ def test_no_file_without_save_dir(tmp_path, monkeypatch):
     assert not (tmp_path / CSV_NAME).exists()
 
 
+def test_console_line_only_without_csv(tmp_path, monkeypatch):
+    # One CSV row per keyframe and stage, no console line (D82); the console
+    # line only when nothing is saved, so the numbers are never lost.
+    from types import SimpleNamespace
+
+    import light_models.diagnostics as diag
+
+    lines = []
+    monkeypatch.setattr(diag, "Log", lambda *a, **k: lines.append(a))
+    vp = SimpleNamespace(exposure_a=torch.tensor(0.1), exposure_b=torch.tensor(0.0))
+    diag.log_albedo_stats(str(tmp_path), 0, "map", torch.tensor([[1.2, 0.5, 0.5]]))
+    diag.log_exposure(str(tmp_path), 0, "map", vp)
+    assert lines == [] and (tmp_path / diag.EXPOSURE_CSV_NAME).exists()
+    diag.log_albedo_stats(None, 0, "map", torch.tensor([[1.2, 0.5, 0.5]]))
+    diag.log_exposure(None, 0, "map", vp)
+    assert len(lines) == 2
+
+
 def test_timing_csv_and_summary(tmp_path):
     # D79: tracking per frame, keyframe mapping, background mapping between keyframes
     from light_models.diagnostics import log_timing, summarize_csv_logs
