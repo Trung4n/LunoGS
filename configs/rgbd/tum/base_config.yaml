@@ -22,6 +22,9 @@ Results:
     map_every_keyframes: 10
     # Width of the stored images in pixels (aspect ratio kept).
     image_width: 320
+    # Folder for <experiment>__<time>.zip of the run (record/ plus config
+    # and CSV logs), written at the end of the run; null = no zip.
+    zip_dir: "results/records_zip"
   use_wandb: False
   # Keyframe trajectory analysis printed at the end of each run
   # (utils/trajectory_analysis.py): sliding-window size for the local

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SLAM Replay</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8z" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 16 16"><path d="M4 3h3v10H4zM9 3h3v10H9z" fill="currentColor"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 16 16"><path d="M4 3h1.6v10H4zM13 3.2v9.6L6.6 8z" fill="currentColor"/></symbol>
+  <symbol id="i-next" viewBox="0 0 16 16"><path d="M10.4 3H12v10h-1.6zM3 3.2v9.6L9.4 8z" fill="currentColor"/></symbol>
+  <symbol id="i-start" viewBox="0 0 16 16"><path d="M3 3h1.6v10H3zM9 3.2v9.6L5 8zM14 3.2v9.6L10 8z" fill="currentColor"/></symbol>
+  <symbol id="i-end" viewBox="0 0 16 16"><path d="M11.4 3H13v10h-1.6zM2 3.2v9.6L6 8zM7 3.2v9.6L11 8z" fill="currentColor"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 16 16"><path d="M2 5h2.5l1.2-1.8h4.6L11.5 5H14v8H2z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="9" r="2.3" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+  <symbol id="i-film" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5 3v10M11 3v10M2 6h3M2 10h3M11 6h3M11 10h3" stroke="currentColor" stroke-width="1.1"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><path d="M2 13h12M4 13V8M8 13V4M12 13V6" stroke="currentColor" stroke-width="1.6" fill="none"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 16 16"><path d="M2 2v12h12" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4 11l3-4 2.5 2L13 4" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="2.5" width="2.4" height="3" fill="currentColor"/><rect x="4" y="6.5" width="2.4" height="3" fill="currentColor"/><rect x="10.5" y="10.5" width="2.4" height="3" fill="currentColor"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M2 4h4l1.4 1.5H14V13H2z" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4"/></symbol>
+</svg>
+
+<div id="app">
+  <header id="top">
+    <div class="title">SLAM Replay</div>
+    <nav class="tabs" id="modes">
+      <button data-mode="follow" title="Đi theo camera [1]">Follow</button>
+      <button data-mode="overview" title="Toàn cảnh từ trên [2]">Overview</button>
+      <button data-mode="orbit" title="Xoay quanh cảnh, vẽ trong trình duyệt [3]">Orbit</button>
+      <button data-mode="free" title="Kéo: xoay · Cuộn: zoom · Chuột phải / Shift+kéo: dời [4]">Tự do</button>
+    </nav>
+    <div class="spacer"></div>
+    <label class="field">Màu
+      <select id="color">
+        <option value="color">Thật / albedo</option>
+        <option value="keyframe">Theo keyframe</option>
+        <option value="opacity">Opacity</option>
+        <option value="height">Độ cao</option>
+      </select>
+    </label>
+    <button class="icon" id="shot" title="Chụp ảnh khung 3D (1920×1080)"><svg><use href="#i-camera"/></svg></button>
+    <button class="icon" id="exportbtn" title="Xuất video"><svg><use href="#i-film"/></svg></button>
+    <span id="renderer" class="renderer"></span>
+  </header>
+
+  <div id="middle">
+    <section id="stage"></section>
+    <aside id="drawer" class="closed">
+      <div class="dhead"><span id="dtitle"></span>
+        <button class="icon small" id="dclose" title="Đóng [Esc]"><svg><use href="#i-close"/></svg></button></div>
+      <div class="dbody">
+        <div class="panel" data-panel="stats"></div>
+        <div class="panel" data-panel="charts">
+          <div class="chart"><div class="clabel">Sai số vị trí <span>cm</span>
+            <label class="inline"><input type="checkbox" id="errlog">thang log</label></div><canvas id="chart-error"></canvas></div>
+          <div class="chart"><div class="clabel">Số Gaussian</div><canvas id="chart-gauss"></canvas></div>
+          <div class="chart"><div class="clabel">Giản đồ phát sáng Φ(θ) <span>nét đứt: lúc đầu</span></div><canvas id="chart-phi"></canvas>
+            <div id="lightvals" class="kv"></div></div>
+        </div>
+        <div class="panel" data-panel="display">
+          <div class="sect">Lớp</div>
+          <label class="row"><input type="checkbox" data-layer="est" checked><i class="ln est"></i>Quỹ đạo ước lượng</label>
+          <label class="row"><input type="checkbox" data-layer="gt" checked><i class="ln gt"></i>Quỹ đạo tham chiếu</label>
+          <label class="row"><input type="checkbox" data-layer="frustum" checked><i class="ln cam"></i>Camera hiện tại</label>
+          <label class="row"><input type="checkbox" data-layer="kf" checked><i class="ln kf"></i>10 keyframe gần nhất</label>
+          <label class="row"><input type="checkbox" id="ceiling">Ẩn trần nhà</label>
+          <label class="row">Độ dài quỹ đạo
+            <select id="trail"><option value="300">300 frame</option><option value="0">Toàn bộ</option></select></label>
+          <div class="sect">Ô ảnh</div>
+          <label class="row"><input type="checkbox" id="thumbs" checked>Hiện ảnh quan sát / render / albedo / độ sâu</label>
+          <label class="row"><input type="checkbox" id="mini" checked>Hiện bản đồ 3D nhỏ xoay vòng</label>
+          <div class="sect">Orbit và Tự do (vẽ trong trình duyệt)</div>
+          <label class="row">Một vòng xoay <span class="val" id="orbitval"></span>
+            <input type="range" id="orbitsec" min="8" max="90" step="1" value="30"></label>
+          <label class="row">Kích thước điểm <span class="val" id="ptval"></span>
+            <input type="range" id="ptscale" min="2" max="9" step="0.5" value="5"></label>
+          <label class="row"><input type="checkbox" id="crisp" checked>Tự do: đổi sang ảnh Gaussian khi thả chuột</label>
+        </div>
+        <div class="panel" data-panel="records">
+          <div id="runlist"></div>
+          <div class="sect">Mở bản ghi</div>
+          <div class="openrow">
+            <input id="openpath" list="discovered" placeholder="Thư mục record (Windows hoặc WSL)" spellcheck="false">
+            <button id="openbtn">Mở</button>
+          </div>
+          <datalist id="discovered"></datalist>
+          <p class="note">Hiện tối đa hai bản ghi cạnh nhau. Gỡ một bản ghi chỉ đóng nó trong app, không xóa file.</p>
+        </div>
+      </div>
+    </aside>
+    <nav id="rail">
+      <button data-open="stats" title="Thông số"><svg><use href="#i-info"/></svg></button>
+      <button data-open="charts" title="Đồ thị"><svg><use href="#i-chart"/></svg></button>
+      <button data-open="display" title="Hiển thị"><svg><use href="#i-sliders"/></svg></button>
+      <button data-open="records" title="Bản ghi"><svg><use href="#i-folder"/></svg></button>
+    </nav>
+  </div>
+
+  <footer id="bottom">
+    <div class="transport">
+      <button class="icon" id="first" title="Về đầu [Home]"><svg><use href="#i-start"/></svg></button>
+      <button class="icon" id="prev" title="Lùi [←]"><svg><use href="#i-prev"/></svg></button>
+      <button class="icon play" id="play" title="Phát / dừng [Space]"><svg><use href="#i-play"/></svg></button>
+      <button class="icon" id="next" title="Tới [→]"><svg><use href="#i-next"/></svg></button>
+      <button class="icon" id="last" title="Về cuối [End]"><svg><use href="#i-end"/></svg></button>
+    </div>
+    <div id="readout" class="readout">–</div>
+    <div id="timeline"><canvas id="tl"></canvas></div>
+    <select id="speed" title="Tốc độ phát">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="4">4×</option>
+    </select>
+  </footer>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="dialog">
+    <div class="dtitle">Xuất video</div>
+    <p class="note">Các bản ghi đang hiện, bố cục của render_replay.py, kèm file chú thích .txt. Khung 3D tạm dừng trong lúc xuất.</p>
+    <label class="row">Góc nhìn <select id="exview"><option value="follow">Follow</option><option value="overview">Overview</option></select></label>
+    <label class="row">Từ frame <input id="exstart" type="number"></label>
+    <label class="row">Đến frame <input id="exend" type="number"></label>
+    <div id="exstatus" class="note"></div>
+    <div class="dbuttons"><button id="excancel">Đóng</button><button id="exgo" class="primary">Xuất</button></div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

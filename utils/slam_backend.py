@@ -9,7 +9,7 @@ from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from light_models.albedo_init import get_albedo_init
-from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light
+from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj, drain_queue
@@ -640,6 +640,9 @@ class BackEnd(mp.Process):
         # Process entry point. Messages take priority; when the queue is empty
         # the backend keeps refining the current window.
         self.start_light_learning()
+        # Background mapping since the last keyframe (timing log, D79).
+        bg_iters, bg_ms = 0, 0.0
+        save_dir = self.config["Results"]["save_dir"]
         while True:
             if self.backend_queue.empty():
                 # Idle cases: paused, nothing to map yet, or no background
@@ -659,7 +662,11 @@ class BackEnd(mp.Process):
                 # message is picked up quickly. Every 10 iterations: a prune
                 # pass (a single pass despite iters=10, see map()) and a new
                 # snapshot for the frontend.
+                t_bg = time.perf_counter()
                 self.map(self.current_window)
+                torch.cuda.synchronize()
+                bg_iters += 1
+                bg_ms += 1000 * (time.perf_counter() - t_bg)
                 if self.last_sent >= 10:
                     self.map(self.current_window, prune=True, iters=10)
                     self.push_to_frontend()
@@ -705,6 +712,9 @@ class BackEnd(mp.Process):
                     viewpoint = data[2]
                     current_window = data[3]
                     depth_map = data[4]
+                    log_timing(save_dir, "background", cur_frame_idx, bg_ms, bg_iters)
+                    bg_iters, bg_ms = 0, 0.0
+                    t_kf = time.perf_counter()
 
                     self.viewpoints[cur_frame_idx] = viewpoint
                     self.current_window = current_window
@@ -785,6 +795,8 @@ class BackEnd(mp.Process):
 
                     self.map(self.current_window, iters=iter_per_kf)
                     self.map(self.current_window, prune=True)
+                    torch.cuda.synchronize()
+                    log_timing(save_dir, "keyframe", cur_frame_idx, 1000 * (time.perf_counter() - t_kf), iter_per_kf)
                     if self.shader is not None:
                         self.log_albedo(cur_frame_idx, "map")
                     self.log_learned(cur_frame_idx)

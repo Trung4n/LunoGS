@@ -25,7 +25,7 @@ from utils.run_recorder import (  # noqa: E402
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CFG = {"enabled": True, "frame_every": 5, "map_every_keyframes": 10, "image_width": 32}
+CFG = {"enabled": True, "frame_every": 5, "map_every_keyframes": 10, "image_width": 32, "zip_dir": None}
 H, W = 34, 60
 
 
@@ -34,11 +34,15 @@ H, W = 34, 60
 
 def test_disabled_record_is_none_and_keys_are_validated():
     assert read_record_config({"record": {**CFG, "enabled": False}}) is None
-    assert read_record_config({"record": CFG}) == {"frame_every": 5, "map_every_keyframes": 10, "image_width": 32}
+    assert read_record_config({"record": CFG}) == {"frame_every": 5, "map_every_keyframes": 10, "image_width": 32,
+                                                   "zip_dir": None}
+    assert read_record_config({"record": {**CFG, "zip_dir": "z"}})["zip_dir"] == "z"
     with pytest.raises(KeyError):
         read_record_config({})
     for bad in ({**CFG, "frame_every": 0}, {**CFG, "enabled": "yes"}, {**CFG, "extra": 1},
-                {k: v for k, v in CFG.items() if k != "image_width"}):
+                {**CFG, "zip_dir": ""}, {**CFG, "zip_dir": 3},
+                {k: v for k, v in CFG.items() if k != "image_width"},
+                {k: v for k, v in CFG.items() if k != "zip_dir"}):
         with pytest.raises((ValueError, TypeError, KeyError)):
             read_record_config({"record": bad})
 
@@ -201,3 +205,56 @@ def test_replay_video_from_a_recording(tmp_path):
     assert run_a.image(10, "albedo") is not None and run_b.image(10, "albedo") is None
     assert run_a.color_gain > 0 and run_b.color_gain == 1.0
     assert math.isfinite(run_a.color_gain)
+    # the legend is written next to the video, not drawn on it
+    notes = (tmp_path / "replay.txt").read_text(encoding="utf-8")
+    assert "light" in notes and "MonoGS" in notes and "3D map (orbit)" in notes and "overview" in notes
+
+
+def test_both_views_with_default_names_from_a_record_folder(tmp_path):
+    rr = _replay()
+    a = _record(tmp_path, with_albedo=True)
+    # the record/ folder itself, as downloaded on its own
+    rr.main(["--run", str(a / "record"), "--renderer", "points", "--map_width", "160", "--map_height", "90",
+             "--panel_width", "60", "--no_h264"])
+    videos = a / "videos"
+    names = sorted(os.listdir(videos))
+    assert names == ["rgbd_nocos__office0_lit_follow.mp4", "rgbd_nocos__office0_lit_follow.txt",
+                     "rgbd_nocos__office0_lit_overview.mp4", "rgbd_nocos__office0_lit_overview.txt"]
+    cap = cv2.VideoCapture(str(videos / "rgbd_nocos__office0_lit_follow.mp4"))
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 4
+    cap.release()
+
+
+def test_orbit_camera_circles_the_centre():
+    rr = _replay()
+    up = np.array([0.0, 0.0, 1.0])
+    c = np.array([1.0, 2.0, 0.5])
+    poses = [rr.orbit_pose(c, up, 2.0, math.radians(30), a) for a in (0.0, math.pi / 2, math.pi)]
+    for p in poses:
+        assert np.linalg.norm(p[:3, 3] - c) == pytest.approx(2.0)
+        assert (p[:3, 3] - c) @ up == pytest.approx(1.0)  # 2 * sin(30 deg)
+        assert np.allclose(p[:3, 2], (c - p[:3, 3]) / 2.0)  # looks at the centre
+    assert np.allclose(poses[0][:2, 3] + poses[2][:2, 3], 2 * c[:2])  # opposite sides
+
+
+def test_pack_records_zips_each_run(tmp_path):
+    import importlib.util
+    import zipfile
+
+    spec = importlib.util.spec_from_file_location("pack_records", os.path.join(REPO, "tools", "viz", "pack_records.py"))
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+    run = _record(tmp_path / "results")  # results/rgbd_nocos__office0_lit/2026-10-28/record
+    (run / "config.yml").write_text("x: 1")
+    (run / "timing.csv").write_text("kind,index,ms,iters\n")
+    pr.main(["--results", str(tmp_path / "results"), "--out", str(tmp_path / "zips")])
+    path = tmp_path / "zips" / "rgbd_nocos__office0_lit__2026-10-28.zip"
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        z.extractall(tmp_path / "unzipped")
+    root = "rgbd_nocos__office0_lit__2026-10-28/"
+    assert root + "config.yml" in names and root + "record/meta.json" in names
+    assert root + "timing.csv" in names and root + "light_learned.csv" not in names
+    assert any(n.startswith(root + "record/maps/") for n in names)
+    # unzipped, the folder is directly a --run of the replay tool
+    assert _replay().Run(str(tmp_path / "unzipped" / root)).image_frames == [5, 10, 15, 20]

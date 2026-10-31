@@ -1,26 +1,29 @@
 """Replay video of recorded SLAM runs (docs/DECISIONS.md D76).
 
-Reads <run>/record/ written by slam.py --record (utils/run_recorder.py) and
-draws, frame by frame, what the live GUI would have shown:
+Reads the record/ folder written by slam.py --record (utils/run_recorder.py)
+and draws, frame by frame, what the live GUI would have shown:
 
-  left   the Gaussian map as it grows, seen from a virtual camera, with the
-         estimated trajectory (red), the reference trajectory (green), the
-         current camera frustums and the keyframes (blue);
-  right  observed image, rendered image, rendered albedo (light model),
-         rendered depth, the learned emission profile (when the angular
-         profile is learned) and a text panel (frame, keyframes, Gaussians,
-         live position error).
+  left   the Gaussian map as it grows, from a virtual camera ('follow':
+         behind the estimated camera; 'overview': fixed above the
+         trajectory), with the estimated and reference trajectories, the
+         current frustums and the latest keyframes;
+  right  observed, rendered, albedo (light model) and depth images, the
+         learned emission profile, and the current map from a third-person
+         camera circling the scene.
 
-Several runs (e.g. original MonoGS on `lit` vs the light model) are stacked
-vertically and synchronised on the frame index.
+The legend is not drawn on the video: it is written next to it, in
+<video>.txt. Several runs (e.g. MonoGS on `lit` vs the light model) are
+stacked vertically, synchronised on the frame index.
 
-    python tools/viz/render_replay.py --run results/rgbd_nocos__office0_lit/<time> \
-        --run results/office0__office0_lit/<time> --label "light model" \
-        --label "MonoGS" --out office0.mp4
+    # both views, default names (<record's folder>/videos/<run>_<view>.mp4)
+    python tools/viz/render_replay.py --run record/office0_even_rgbd
+    # comparison
+    python tools/viz/render_replay.py --run <MonoGS lit run> --label "MonoGS (lit)"         --run <nocos run> --label "light model"
 
-The map view uses the MonoGS rasterizer (needs CUDA and the built
-submodules); --renderer points draws the Gaussian centres with numpy instead
-(no GPU, for a quick look). Display only: nothing here feeds back into SLAM.
+The map views use the MonoGS rasterizer when CUDA is available (--renderer
+auto), otherwise a CPU preview (one opaque disc per Gaussian). The videos
+are re-encoded to H.264 when ffmpeg exists. Display only: nothing here feeds
+back into SLAM.
 """
 import argparse
 import csv
@@ -63,9 +66,11 @@ class Run:
     """One recorded run: metadata, poses, images and map snapshots."""
 
     def __init__(self, run_dir, label=None):
-        self.dir = os.path.join(run_dir, "record")
-        if not os.path.isdir(self.dir):
-            raise FileNotFoundError(f"{run_dir}: no record/ folder (run slam.py with --record)")
+        # Either the run folder (results/<experiment>/<time>) or its record/
+        # folder itself (e.g. downloaded on its own).
+        self.dir = run_dir if os.path.isfile(os.path.join(run_dir, "meta.json")) else os.path.join(run_dir, "record")
+        if not os.path.isfile(os.path.join(self.dir, "meta.json")):
+            raise FileNotFoundError(f"{run_dir}: no record/meta.json (run slam.py with --record)")
         with open(os.path.join(self.dir, "meta.json"), encoding="utf-8") as f:
             self.meta = json.load(f)
         self.label = label or self.meta["run"]
@@ -87,7 +92,7 @@ class Run:
             with np.load(final_map) as z:
                 self.maps.append((int(z["frame_idx"]), final_map))
         self.maps.sort(key=lambda m: m[0])
-        self.light = _read_light(os.path.join(run_dir, "light_learned.csv"))
+        self.light = _read_light(os.path.join(os.path.dirname(os.path.normpath(self.dir)), "light_learned.csv"))             or _read_light(os.path.join(self.dir, "light_learned.csv"))
         self._map_cache = (None, None)
         self.color_gain = self._color_gain()
 
@@ -231,46 +236,87 @@ def frustum_lines(c2w, intr, depth):
 # ---------------------------------------------------------------- drawing
 
 
+def _visible_runs(uv, ok):
+    """Maximal runs of consecutive drawable points, as int32 (n,1,2) arrays."""
+    runs, start = [], None
+    for i, good in enumerate(ok):
+        if good and start is None:
+            start = i
+        elif not good and start is not None:
+            runs.append(uv[start:i])
+            start = None
+    if start is not None:
+        runs.append(uv[start:])
+    return [np.round(r).astype(np.int32).reshape(-1, 1, 2) for r in runs if len(r) >= 2]
+
+
 def draw_polyline(img, points, c2w, K, color, thickness):
+    """Polyline through world points; pieces behind the camera (or absurdly
+    far off-screen) are skipped. One projection, one cv2.polylines call."""
     import cv2
 
     if len(points) < 2:
         return
-    uv, front = project(np.asarray(points), c2w, K)
-    for i in range(len(uv) - 1):
-        if front[i] and front[i + 1]:
-            a, b = uv[i], uv[i + 1]
-            if np.all(np.abs(np.concatenate([a, b])) < 1e5):
-                cv2.line(img, tuple(int(v) for v in a), tuple(int(v) for v in b), color, thickness, cv2.LINE_AA)
+    uv, front = project(np.asarray(points, dtype=np.float64), c2w, K)
+    ok = front & np.all(np.abs(uv) < 1e5, axis=1)
+    runs = _visible_runs(uv, ok)
+    if runs:
+        cv2.polylines(img, runs, False, color, thickness, cv2.LINE_AA)
 
 
 def draw_segments(img, segs, c2w, K, color, thickness):
-    for a, b in segs:
-        draw_polyline(img, [a, b], c2w, K, color, thickness)
+    """Independent segments [(a, b), ...] projected together."""
+    import cv2
+
+    if not segs:
+        return
+    pts = np.asarray([p for seg in segs for p in seg], dtype=np.float64)
+    uv, front = project(pts, c2w, K)
+    ok = (front & np.all(np.abs(uv) < 1e5, axis=1)).reshape(-1, 2).all(axis=1)
+    lines = np.round(uv).astype(np.int32).reshape(-1, 2, 2)[ok]
+    if len(lines):
+        cv2.polylines(img, list(lines.reshape(-1, 2, 1, 2)), False, color, thickness, cv2.LINE_AA)
 
 
-def render_points(snap, colors, c2w, K, size, background):
-    """CPU fallback: Gaussian centres splatted as 2x2 points, far to near."""
+def render_points(snap, colors, c2w, K, size, background, max_radius=8, footprint=3.0):
+    """CPU fallback (no CUDA): every Gaussian drawn as an opaque disc whose
+    pixel radius follows its largest scale (footprint x sigma), nearest disc
+    wins per pixel (z-buffer). No alpha blending: a preview, not a render."""
     w, h = size
     img = np.empty((h, w, 3), np.float32)
     img[:] = background
     keep = snap["opacity"].astype(np.float32) > 0.5
-    uv, front = project(snap["xyz"][keep].astype(np.float64), c2w, K)
-    c = colors[keep]
+    xyz = snap["xyz"][keep].astype(np.float64)
+    uv, front = project(xyz, c2w, K)
     w2c = np.linalg.inv(c2w)
-    z = (snap["xyz"][keep] @ w2c[:3, :3].T + w2c[:3, 3])[:, 2]
-    ok = front & (uv[:, 0] >= 0) & (uv[:, 0] < w - 1) & (uv[:, 1] >= 0) & (uv[:, 1] < h - 1)
-    order = np.argsort(-z[ok])
-    u = uv[ok][order].astype(int)
-    col = c[ok][order]
-    for dy in (0, 1):
-        for dx in (0, 1):
-            img[u[:, 1] + dy, u[:, 0] + dx] = col
-    return (img[:, :, ::-1] * 255).astype(np.uint8)  # RGB -> BGR
+    z = (xyz @ w2c[:3, :3].T + w2c[:3, 3])[:, 2]
+    sigma = snap["scaling"][keep].astype(np.float32).max(axis=1)
+    ok = front & (uv[:, 0] > -max_radius) & (uv[:, 0] < w + max_radius)         & (uv[:, 1] > -max_radius) & (uv[:, 1] < h + max_radius)
+    u, v, z, sigma, col = uv[ok, 0], uv[ok, 1], z[ok], sigma[ok], colors[keep][ok]
+    r = np.clip(np.ceil(K[0, 0] * footprint * sigma / z), 1, max_radius).astype(int)
+    pix, depth, cidx = [], [], []
+    for rr in np.unique(r):
+        sel = np.nonzero(r == rr)[0]
+        dy, dx = np.mgrid[-rr:rr + 1, -rr:rr + 1]
+        disc = dx ** 2 + dy ** 2 <= rr * rr + rr
+        dx, dy = dx[disc], dy[disc]
+        px = (np.round(u[sel])[:, None] + dx[None]).astype(int)
+        py = (np.round(v[sel])[:, None] + dy[None]).astype(int)
+        inside = (px >= 0) & (px < w) & (py >= 0) & (py < h)
+        pix.append((py * w + px)[inside])
+        depth.append(np.broadcast_to(z[sel][:, None], px.shape)[inside])
+        cidx.append(np.broadcast_to(sel[:, None], px.shape)[inside])
+    if pix:
+        pix, depth, cidx = np.concatenate(pix), np.concatenate(depth), np.concatenate(cidx)
+        order = np.lexsort((depth, pix))
+        first = np.unique(pix[order], return_index=True)[1]
+        win = order[first]
+        img.reshape(-1, 3)[pix[win]] = col[cidx[win]]
+    return (np.clip(img, 0, 1)[:, :, ::-1] * 255).astype(np.uint8)  # RGB -> BGR
 
 
 class GaussianRenderer:
-    """Map view through the MonoGS rasterizer, colours precomputed."""
+    """Map view through the MonoGS rasterizer (display colours as SH degree 0)."""
 
     def __init__(self, background):
         import torch
@@ -278,34 +324,43 @@ class GaussianRenderer:
 
         from gaussian_splatting.gaussian_renderer import render
         from gaussian_splatting.scene.gaussian_model import GaussianModel
+        from gaussian_splatting.utils.sh_utils import RGB2SH
         from utils.camera_utils import Camera
 
         self.torch, self.render, self.GaussianModel, self.Camera = torch, render, GaussianModel, Camera
+        self.RGB2SH = RGB2SH
         self.pipe = SimpleNamespace(compute_cov3D_python=False, convert_SHs_python=False, debug=False)
         self.bg = torch.tensor(background, dtype=torch.float32, device="cuda")
-        self._snap_id, self._model = None, None
+        # The snapshot itself is kept (not its id): an id can be reused once
+        # the old dict is garbage collected.
+        self._snap, self._model, self._colors = None, None, None
 
     def _model_for(self, snap, colors):
         torch = self.torch
-        if self._snap_id is not id(snap):
+        dev = "cuda"
+        f = lambda a: torch.tensor(np.asarray(a, np.float32), device=dev)  # noqa: E731
+        if self._snap is not snap:
             m = self.GaussianModel(0)
-            dev = "cuda"
-            f = lambda a: torch.tensor(np.asarray(a, np.float32), device=dev)  # noqa: E731
             m._xyz = f(snap["xyz"])
             m._scaling = torch.log(f(snap["scaling"]).clamp_min(1e-8))
             m._rotation = f(snap["rotation"])
             op = f(snap["opacity"]).clamp(1e-6, 1 - 1e-6)[:, None]
             m._opacity = torch.log(op / (1 - op))
-            n = m._xyz.shape[0]
-            m._features_dc = torch.zeros(n, 1, 3, device=dev)
-            m._features_rest = torch.zeros(n, 0, 3, device=dev)
-            self._model, self._colors, self._snap_id = m, f(colors), id(snap)
-        return self._model, self._colors
+            m._features_rest = torch.zeros(m._xyz.shape[0], 0, 3, device=dev)
+            self._model, self._snap, self._colors = m, snap, None
+        if self._colors is not colors:
+            # Colours as the degree-0 SH coefficient: the rasterizer splats
+            # C0 * dc + 0.5. (render()'s override_color is never used: it
+            # tests colors_precomp, just set to None, instead of
+            # override_color.) Re-uploaded when the colour mode changes.
+            self._model._features_dc = self.RGB2SH(f(colors))[:, None, :]
+            self._colors = colors
+        return self._model
 
     def __call__(self, snap, colors, c2w, K, size):
         torch = self.torch
         w, h = size
-        model, col = self._model_for(snap, colors)
+        model = self._model_for(snap, colors)
         w2c = np.linalg.inv(c2w)
         fovx = 2 * math.atan(w / (2 * K[0, 0]))
         fovy = 2 * math.atan(h / (2 * K[1, 1]))
@@ -314,7 +369,7 @@ class GaussianRenderer:
         cam.update_RT(torch.tensor(w2c[:3, :3], dtype=torch.float32, device="cuda"),
                       torch.tensor(w2c[:3, 3], dtype=torch.float32, device="cuda"))
         with torch.no_grad():
-            out = self.render(cam, model, self.pipe, self.bg, override_color=col, shader=None)["render"]
+            out = self.render(cam, model, self.pipe, self.bg, shader=None)["render"]
         img = (out.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
         return img[:, :, ::-1].copy()
 
@@ -348,7 +403,10 @@ def put_text(img, lines, org=(8, 20), scale=0.5):
 
     x, y = org
     for line in lines:
-        cv2.putText(img, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        # Dark outline from thin text shifted by 1 px (a thicker stroke changes
+        # the glyph widths in OpenCV 5 and misaligns the outline).
+        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+            cv2.putText(img, line, (x + ox, y + oy), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 1, cv2.LINE_AA)
         cv2.putText(img, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, COL_TEXT, 1, cv2.LINE_AA)
         y += int(26 * scale / 0.5)
 
@@ -393,109 +451,335 @@ def light_panel(run, n_kf, size):
 # ---------------------------------------------------------------- composing
 
 
+def orbit_pose(centre, up, radius, elevation, angle):
+    """Camera on a circle around `centre`, `elevation` above the horizon."""
+    e1 = np.cross(up, [1.0, 0.0, 0.0])
+    if np.linalg.norm(e1) < 1e-6:
+        e1 = np.cross(up, [0.0, 1.0, 0.0])
+    e1 = e1 / np.linalg.norm(e1)
+    e2 = np.cross(up, e1)
+    horiz = math.cos(angle) * e1 + math.sin(angle) * e2
+    eye = centre + radius * (math.cos(elevation) * horiz + math.sin(elevation) * up)
+    return look_at(eye, centre, up)
+
+
+def view_defaults(args, view):
+    """(ceiling margin or None, trail length or None) of a view."""
+    ceiling = args.ceiling if args.ceiling is not None else (0.3 if view == "overview" else None)
+    trail = args.trail if args.trail is not None else (300 if view == "follow" else None)
+    return ceiling, trail
+
+
 class RowRenderer:
     """One run's row of the video: map view plus the side panels."""
 
-    def __init__(self, run, args, map_renderer):
-        self.run, self.args, self.map_renderer = run, args, map_renderer
+    def __init__(self, run, args, view, make_renderer):
+        self.run, self.args, self.view = run, args, view
+        # Separate renderers: each caches the map snapshot it last uploaded.
+        self.map_renderer, self.orbit_renderer = make_renderer(run), make_renderer(run)
         self.map_size = (args.map_width, args.map_height)
         self.K = intrinsics(args.map_width, args.map_height, args.fov)
+        self.panel_size = (args.panel_width, args.map_height // 3)
+        self.K_orbit = intrinsics(*self.panel_size, args.orbit_fov)
         gts = [run.gt[i] for i in sorted(run.gt)]
         self.up = world_up(gts)
         positions = np.array([p[:3, 3] for p in gts])
         self.overview = overview_pose(positions, self.up, math.radians(args.elevation), args.distance)
         self.follow = FollowCamera(self.up, args.back, args.height, args.ahead, args.smoothing)
         self.intr = run.meta["intrinsics"]
-        # Height above which Gaussians are hidden (the ceiling blocks a view
-        # from above); None = keep everything.
-        self.ceiling = None
-        if args.ceiling is not None:
-            self.ceiling = float((positions @ self.up).max()) + args.ceiling
-        self._cut_cache = (None, None)
+        self.centre = positions.mean(axis=0)
+        flat = positions - self.centre
+        flat = flat - np.outer(flat @ self.up, self.up)
+        self.extent = max(float(np.linalg.norm(flat, axis=1).max()), 0.5)
+        # Gaussians above the highest camera + margin are hidden in views from
+        # above (the ceiling would block them); None = keep everything.
+        top = float((positions @ self.up).max())
+        ceiling, self.trail = view_defaults(args, view)
+        self.ceiling = None if ceiling is None else top + ceiling
+        self.orbit_ceiling = top + args.orbit_ceiling
+        self._cuts = {}
 
-    def _cut(self, snap):
-        if self.ceiling is None or snap is None:
+    def _cut(self, snap, height):
+        if height is None or snap is None:
             return snap
-        if self._cut_cache[0] is not snap:
-            keep = snap["xyz"].astype(np.float64) @ self.up <= self.ceiling
+        key = (id(snap), height)
+        if key not in self._cuts:
+            keep = snap["xyz"].astype(np.float64) @ self.up <= height
             cut = {k: (v[keep] if getattr(v, "ndim", 0) >= 1 and len(v) == len(keep) else v)
                    for k, v in snap.items()}
-            self._cut_cache = (snap, cut)
-        return self._cut_cache[1]
+            self._cuts = {k: v for k, v in self._cuts.items() if k[0] == id(snap)}
+            self._cuts[key] = cut
+        return self._cuts[key]
+
+    def _draw_cameras(self, img, frame_idx, c2w, K, trail, kf_window, thickness):
+        run = self.run
+        upto = [i for i in sorted(run.est_live) if i <= frame_idx]
+        if trail is not None:
+            upto = [i for i in upto if i > frame_idx - trail]
+        draw_polyline(img, [run.gt[i][:3, 3] for i in upto], c2w, K, COL_GT, thickness)
+        draw_polyline(img, [run.est_live[i][:3, 3] for i in upto], c2w, K, COL_EST, thickness)
+        # Frustums of the latest keyframes only (like the window shown by
+        # the live GUI); all keyframes clutter the view.
+        if kf_window:
+            recent = [kf for kf in run.keyframes if kf <= frame_idx and kf in run.est_live]
+            for kf in recent[-kf_window:]:
+                draw_segments(img, frustum_lines(run.est_live[kf], self.intr, self.args.kf_frustum),
+                              c2w, K, COL_KF, 1)
+        draw_segments(img, frustum_lines(run.gt[frame_idx], self.intr, self.args.frustum), c2w, K, COL_GT,
+                      thickness)
+        draw_segments(img, frustum_lines(run.est_live[frame_idx], self.intr, self.args.frustum), c2w, K, COL_EST,
+                      thickness)
 
     def map_view(self, frame_idx):
         run = self.run
         est = run.est_live[frame_idx]
-        c2w = self.overview if self.args.view == "overview" else self.follow.update(est)
-        snap = self._cut(run.map_at(frame_idx))
+        c2w = self.overview if self.view == "overview" else self.follow.update(est)
+        snap = self._cut(run.map_at(frame_idx), self.ceiling)
         if snap is None:
             img = np.zeros((self.map_size[1], self.map_size[0], 3), np.uint8)
         else:
             img = self.map_renderer(snap, run.display_colors(snap), c2w, self.K, self.map_size)
-        upto = [i for i in sorted(run.est_live) if i <= frame_idx]
-        draw_polyline(img, [run.gt[i][:3, 3] for i in upto], c2w, self.K, COL_GT, 2)
-        draw_polyline(img, [run.est_live[i][:3, 3] for i in upto], c2w, self.K, COL_EST, 2)
-        # Frustums of the latest keyframes only (like the window shown by
-        # the live GUI); all keyframes clutter the view.
-        recent = [kf for kf in run.keyframes if kf <= frame_idx and kf in run.est_live]
-        for kf in recent[-self.args.kf_window:]:
-            draw_segments(img, frustum_lines(run.est_live[kf], self.intr, self.args.kf_frustum),
-                          c2w, self.K, COL_KF, 1)
-        draw_segments(img, frustum_lines(run.gt[frame_idx], self.intr, self.args.frustum), c2w, self.K, COL_GT, 2)
-        draw_segments(img, frustum_lines(est, self.intr, self.args.frustum), c2w, self.K, COL_EST, 2)
+        self._draw_cameras(img, frame_idx, c2w, self.K, self.trail, self.args.kf_window, 2)
         n_g = 0 if snap is None else len(snap["xyz"])
         err = np.linalg.norm(est[:3, 3] - run.gt[frame_idx][:3, 3]) * 100
         put_text(img, [run.label, f"frame {frame_idx}  keyframes {run.n_keyframes.get(frame_idx, 0)}",
-                       f"Gaussians {n_g}  position error {err:.1f} cm",
-                       "red: estimate  green: reference  blue: last keyframes"], scale=0.55)
+                       f"Gaussians {n_g}  position error {err:.1f} cm"], scale=0.55)
         return img
 
-    def panels(self, frame_idx):
+    def orbit_view(self, frame_idx, n):
+        """The current map from a third-person camera circling the scene."""
+        a = self.args
+        w, h = self.panel_size
+        angle = 2 * math.pi * n / a.orbit_period
+        c2w = orbit_pose(self.centre, self.up, a.orbit_distance * self.extent, math.radians(a.orbit_elevation), angle)
+        snap = self._cut(self.run.map_at(frame_idx), self.orbit_ceiling)
+        if snap is None:
+            img = np.empty((h, w, 3), np.uint8)
+            img[:] = COL_PANEL_BG
+        else:
+            img = self.orbit_renderer(snap, self.run.display_colors(snap), c2w, self.K_orbit, (w, h))
+        self._draw_cameras(img, frame_idx, c2w, self.K_orbit, None, 0, 1)
+        put_text(img, ["3D map (orbit)"], scale=0.45)
+        return img
+
+    def panels(self, frame_idx, n):
         run, a = self.run, self.args
-        pw = (a.panel_width, a.map_height // 3)
+        pw = self.panel_size
+        depth = run.image(frame_idx, "depth")
         tiles = [
             ("observed", run.image(frame_idx, "obs")),
             ("rendered", run.image(frame_idx, "render")),
             ("albedo" if run.meta["map_color"] == "linear_albedo" else "(no albedo: baked colours)",
              run.image(frame_idx, "albedo")),
-            ("rendered depth", None),
+            ("rendered depth", None if depth is None else colorize_depth(depth, a.depth_max)),
         ]
-        depth = run.image(frame_idx, "depth")
-        tiles[3] = ("rendered depth", None if depth is None else colorize_depth(depth, a.depth_max))
         out = []
         for name, im in tiles:
             t = fit(im, pw)
             put_text(t, [name], scale=0.45)
             out.append(t)
         out.append(light_panel(run, run.n_keyframes.get(frame_idx, 0), pw))
-        info = np.empty((pw[1], pw[0], 3), np.uint8)
-        info[:] = COL_PANEL_BG
-        put_text(info, [f"map colours: {run.meta['map_color']}",
-                        f"map gain x{run.color_gain:.2f}" if run.meta["map_color"] == "linear_albedo" else "",
-                        f"view: {a.view}"], scale=0.45)
-        out.append(info)
+        out.append(self.orbit_view(frame_idx, n))
         col1 = np.vstack(out[0::2])
         col2 = np.vstack(out[1::2])
         return np.hstack([col1, col2])
 
-    def __call__(self, frame_idx):
+    def __call__(self, frame_idx, n):
         import cv2
 
         m = self.map_view(frame_idx)
-        p = self.panels(frame_idx)
+        p = self.panels(frame_idx, n)
         if p.shape[0] != m.shape[0]:
             p = cv2.resize(p, (p.shape[1], m.shape[0]))
         return np.hstack([m, p])
 
 
-def main(argv=None):
+# ---------------------------------------------------------------- output
+
+
+def cuda_renderer_available():
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        import diff_gaussian_rasterization  # noqa: F401
+    except Exception:  # noqa: BLE001 - any import problem means "no"
+        return False
+    return True
+
+
+def default_output(runs, view):
+    """<folder holding the first run's record/>/videos/<run>[__vs__<run>]_<view>.mp4"""
+    folder = os.path.join(os.path.dirname(os.path.normpath(runs[0].dir)), "videos")
+    name = "__vs__".join(r.meta["run"] for r in runs)
+    return os.path.join(folder, f"{name}_{view}.mp4")
+
+
+def _wsl_to_windows(path):
+    """/mnt/d/a/b -> D:\\a\\b (for a Windows program called from WSL)."""
+    import re
+
+    m = re.match(r"^/mnt/([a-z])/(.*)$", os.path.abspath(path))
+    if not m:
+        raise ValueError(f"{path} is not on a Windows drive (/mnt/<drive>/...)")
+    return f"{m.group(1).upper()}:\\" + m.group(2).replace("/", "\\")
+
+
+def find_ffmpeg():
+    """(command, path converter) for ffmpeg, or None. Inside WSL without a
+    Linux ffmpeg, the Windows ffmpeg.exe on the PATH (WSL interop) is used,
+    with the file paths converted to Windows paths."""
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is not None:
+        return ffmpeg, (lambda p: p)
+    exe = shutil.which("ffmpeg.exe") if os.name != "nt" else None
+    if exe is not None:
+        return exe, _wsl_to_windows
+    return None
+
+
+def to_h264(path):
+    """Re-encode OpenCV's mp4v file to H.264 in place when ffmpeg exists.
+    mp4v (MPEG-4 part 2) plays in VLC only: messengers (Messenger, Zalo),
+    phones, browsers and PowerPoint need H.264. faststart puts the index
+    first so the video starts before it is fully downloaded."""
+    import subprocess
+
+    found = find_ffmpeg()
+    if found is None:
+        print("ffmpeg not found: the video stays mp4v (plays in VLC only)")
+        return False
+    ffmpeg, conv = found
+    tmp = path + ".h264.mp4"
+    try:
+        src, dst = conv(path), conv(tmp)
+    except ValueError as exc:  # e.g. Windows ffmpeg from WSL, file outside /mnt/<drive>
+        print(f"{exc}: the video stays mp4v (plays in VLC only)")
+        return False
+    subprocess.run([ffmpeg, "-loglevel", "error", "-y", "-i", src, "-c:v", "libx264",
+                    "-profile:v", "high", "-pix_fmt", "yuv420p", "-crf", "23", "-movflags", "+faststart",
+                    dst], check=True)
+    os.replace(tmp, path)
+    return True
+
+
+def write_notes(path, runs, args, view, renderer, n_frames):
+    """Legend of the video in <video>.txt next to it, instead of on screen."""
+    from datetime import datetime
+
+    ceiling, trail = view_defaults(args, view)
+    lines = [
+        f"Video replay SLAM: {os.path.basename(path)}",
+        f"Tạo bởi tools/viz/render_replay.py lúc {datetime.now():%Y-%m-%d %H:%M}; "
+        f"{n_frames} khung hình, {args.fps:g} khung hình/giây.",
+        "",
+        "Các lần chạy (từ trên xuống):",
+    ]
+    for i, r in enumerate(runs, 1):
+        m = r.meta
+        color = (f"albedo tuyến tính (mô hình đèn), nhân x{r.color_gain:.2f} để hiển thị"
+                 if m["map_color"] == "linear_albedo" else "radiance sRGB (MonoGS gốc: màu đã nung ánh sáng)")
+        lines += [f"  {i}. {r.label}",
+                  f"     thư mục   : {m['run']}",
+                  f"     màu bản đồ: {color}",
+                  f"     ghi ảnh mỗi {m['frame_every']} frame, chụp bản đồ mỗi {m['map_every_keyframes']} keyframe"]
+    view_txt = {"follow": "camera ảo đi sau và phía trên camera ước lượng (có làm mượt)",
+                "overview": "camera cố định phía trên quỹ đạo, nhìn toàn phòng"}[view]
+    lines += [
+        "",
+        f"Khung lớn bên trái: bản đồ Gaussian tại thời điểm hiện tại, góc nhìn '{view}': {view_txt}.",
+        "  Đỏ        : quỹ đạo và frustum camera ƯỚC LƯỢNG (pose ngay sau tracking).",
+        "  Xanh lá   : quỹ đạo và frustum camera THAM CHIẾU (ground truth, chỉ để so sánh).",
+        f"  Xanh dương: {args.kf_window} keyframe gần nhất.",
+        "  Chữ       : tên lần chạy; số frame, số keyframe; số Gaussian và sai số vị trí hiện tại (cm),",
+        "              tức khoảng cách giữa camera ước lượng và camera tham chiếu.",
+        "  Quỹ đạo   : " + (f"{trail} frame gần nhất." if trail is not None else "toàn bộ từ đầu chuỗi."),
+    ]
+    if ceiling is not None:
+        lines.append(f"  Gaussian cao hơn camera cao nhất + {ceiling:g} m bị ẩn (trần nhà che góc nhìn từ trên).")
+    lines += [
+        "",
+        "Các ô bên phải:",
+        "  observed       : ảnh đầu vào (rgb) của frame.",
+        "  rendered       : ảnh render từ bản đồ tại pose ước lượng (qua mô hình đèn nếu có).",
+        "  albedo         : albedo render (chỉ mô hình đèn), chia cho phân vị 99 của từng frame.",
+        f"  rendered depth : độ sâu render, thang màu 0-{args.depth_max:g} m (đen = không có).",
+        "  learned light  : giản đồ phát sáng Phi(theta) đang học (spline, 0-50 độ) và các tham số đèn",
+        "                   học được; 'fixed / none' nếu tham số đèn cố định hoặc không có mô hình đèn.",
+        f"  3D map (orbit) : bản đồ hiện tại nhìn từ góc thứ ba quay vòng ({args.orbit_period} khung hình một vòng);",
+        f"                   màu đỏ / xanh lá như trên; ẩn Gaussian cao hơn camera cao nhất + {args.orbit_ceiling:g} m.",
+        "",
+        "Renderer: " + ("rasterizer Gaussian của MonoGS (CUDA)." if renderer == "gaussian" else
+                        "xem thử trên CPU: mỗi Gaussian là một đĩa đặc có z-buffer, không trộn độ trong suốt "
+                        "(hình lốm đốm hơn render thật)."),
+    ]
+    with open(os.path.splitext(path)[0] + ".txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def render_video(runs, args, view, renderer, out):
+    import cv2
+
+    frames = sorted(set.intersection(*[set(r.image_frames) for r in runs]))[:: args.every]
+    if args.max_frames is not None:
+        frames = [f for f in frames if f <= args.max_frames]
+    if args.min_frame is not None:
+        frames = [f for f in frames if f >= args.min_frame]
+    if not frames:
+        raise SystemExit("no common recorded image frame")
+
+    def make_renderer(run):
+        if renderer == "gaussian":
+            return GaussianRenderer(run.meta["background"])
+        bg = np.array(run.meta["background"], np.float32)
+        return lambda snap, colors, c2w, K, size: render_points(snap, colors, c2w, K, size, bg)  # noqa: E731
+
+    rows = [RowRenderer(r, args, view, make_renderer) for r in runs]
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    gif = out.lower().endswith(".gif")
+    writer, gif_frames = None, []
+    for n, f in enumerate(frames):
+        frame = np.vstack([row(f, n) for row in rows])
+        if gif:
+            from PIL import Image
+
+            small = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2), interpolation=cv2.INTER_AREA)
+            gif_frames.append(Image.fromarray(small[:, :, ::-1]))
+        else:
+            if writer is None:
+                writer = cv2.VideoWriter(out, cv2.VideoWriter_fourcc(*"mp4v"), args.fps,
+                                         (frame.shape[1], frame.shape[0]))
+            writer.write(frame)
+        if n % 50 == 0:
+            print(f"  [{view}] frame {f} ({n + 1}/{len(frames)})", flush=True)
+    if gif:
+        gif_frames[0].save(out, save_all=True, append_images=gif_frames[1:], duration=int(1000 / args.fps), loop=0)
+    else:
+        writer.release()
+        if not args.no_h264:
+            to_h264(out)
+    write_notes(out, runs, args, view, renderer, len(frames))
+    print(f"wrote {out} ({len(frames)} frames) and its notes {os.path.splitext(out)[0]}.txt")
+
+
+def build_parser():
+    """Command-line options (also the defaults of tools/viz/replay_app.py's
+    video export)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", action="append", required=True, help="results/<experiment>/<time> (repeatable)")
+    ap.add_argument("--run", action="append", required=True,
+                    help="run folder (results/<experiment>/<time>) or its record/ folder; repeatable")
     ap.add_argument("--label", action="append", default=[], help="one per --run, in order")
-    ap.add_argument("--out", required=True, help=".mp4 (or .gif)")
+    ap.add_argument("--out", default=None,
+                    help=".mp4 or .gif; with several views the view name is appended "
+                    "(default: <folder of the record>/videos/<run>_<view>.mp4)")
+    ap.add_argument("--view", nargs="+", choices=("follow", "overview"), default=["follow", "overview"])
+    ap.add_argument("--renderer", choices=("auto", "gaussian", "points"), default="auto",
+                    help="auto: the MonoGS rasterizer when CUDA is available, else points")
     ap.add_argument("--fps", type=float, default=15.0)
-    ap.add_argument("--view", choices=("follow", "overview"), default="follow")
-    ap.add_argument("--renderer", choices=("gaussian", "points"), default="gaussian")
+    ap.add_argument("--no_h264", action="store_true", help="keep OpenCV's mp4v encoding")
     ap.add_argument("--map_width", type=int, default=960)
     ap.add_argument("--map_height", type=int, default=540)
     ap.add_argument("--panel_width", type=int, default=320)
@@ -505,60 +789,48 @@ def main(argv=None):
     ap.add_argument("--ahead", type=float, default=1.0, help="follow: look-at point ahead (m)")
     ap.add_argument("--smoothing", type=float, default=0.15, help="follow: 0..1, 1 = no smoothing")
     ap.add_argument("--elevation", type=float, default=55.0, help="overview: degrees above the horizon")
+    ap.add_argument("--distance", type=float, default=1.6, help="overview: distance in trajectory extents")
     ap.add_argument("--ceiling", type=float, default=None,
                     help="hide Gaussians higher than the highest camera + this many metres "
-                    "(default: 0.3 for --view overview, off for follow)")
-    ap.add_argument("--distance", type=float, default=1.6, help="overview: distance in trajectory extents")
+                    "(default: 0.3 for overview, off for follow)")
+    ap.add_argument("--orbit_period", type=int, default=240, help="orbit panel: frames per turn")
+    ap.add_argument("--orbit_elevation", type=float, default=40.0, help="orbit panel: degrees above the horizon")
+    ap.add_argument("--orbit_distance", type=float, default=1.8, help="orbit panel: distance in trajectory extents")
+    ap.add_argument("--orbit_fov", type=float, default=60.0, help="orbit panel: horizontal FOV (deg)")
+    ap.add_argument("--orbit_ceiling", type=float, default=0.3, help="orbit panel: like --ceiling")
     ap.add_argument("--frustum", type=float, default=0.15, help="current frustum depth (m)")
     ap.add_argument("--kf_frustum", type=float, default=0.08, help="keyframe frustum depth (m)")
     ap.add_argument("--kf_window", type=int, default=10, help="draw the frustums of the last n keyframes")
+    ap.add_argument("--trail", type=int, default=None,
+                    help="draw the trajectories over the last n frames only "
+                    "(default: 300 for follow, the whole run for overview)")
     ap.add_argument("--depth_max", type=float, default=5.0, help="depth colour scale (m)")
     ap.add_argument("--every", type=int, default=1, help="use every n-th recorded image frame")
     ap.add_argument("--max_frames", type=int, default=None, help="stop after this frame index")
+    ap.add_argument("--min_frame", type=int, default=None, help="start at this frame index")
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     args = ap.parse_args(argv)
-    if args.ceiling is None and args.view == "overview":
-        args.ceiling = 0.3
-    import cv2
 
     if args.label and len(args.label) != len(args.run):
         ap.error("give one --label per --run, or none")
     runs = [Run(d, args.label[i] if args.label else None) for i, d in enumerate(args.run)]
-    frames = sorted(set.intersection(*[set(r.image_frames) for r in runs]))[:: args.every]
-    if args.max_frames is not None:
-        frames = [f for f in frames if f <= args.max_frames]
-    if not frames:
-        raise SystemExit("no common recorded image frame")
-    def map_renderer(run):
-        # One per run: the renderer caches the uploaded map snapshot.
-        if args.renderer == "gaussian":
-            return GaussianRenderer(run.meta["background"])
-        bg = np.array(run.meta["background"], np.float32)
-        return lambda snap, colors, c2w, K, size: render_points(snap, colors, c2w, K, size, bg)  # noqa: E731
-
-    rows = [RowRenderer(r, args, map_renderer(r)) for r in runs]
-
-    gif = args.out.lower().endswith(".gif")
-    writer, gif_frames = None, []
-    for n, f in enumerate(frames):
-        frame = np.vstack([row(f) for row in rows])
-        if gif:
-            from PIL import Image
-
-            small = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2), interpolation=cv2.INTER_AREA)
-            gif_frames.append(Image.fromarray(small[:, :, ::-1]))
+    renderer = args.renderer
+    if renderer == "auto":
+        renderer = "gaussian" if cuda_renderer_available() else "points"
+        print(f"renderer: {renderer}" + ("" if renderer == "gaussian" else " (no CUDA rasterizer: CPU preview)"))
+    for view in args.view:
+        if args.out is None:
+            out = default_output(runs, view)
+        elif len(args.view) > 1:
+            stem, ext = os.path.splitext(args.out)
+            out = f"{stem}_{view}{ext}"
         else:
-            if writer is None:
-                writer = cv2.VideoWriter(args.out, cv2.VideoWriter_fourcc(*"mp4v"), args.fps,
-                                         (frame.shape[1], frame.shape[0]))
-            writer.write(frame)
-        if n % 50 == 0:
-            print(f"frame {f} ({n + 1}/{len(frames)})", flush=True)
-    if gif:
-        gif_frames[0].save(args.out, save_all=True, append_images=gif_frames[1:],
-                           duration=int(1000 / args.fps), loop=0)
-    else:
-        writer.release()
-    print(f"wrote {args.out} ({len(frames)} frames)")
+            out = args.out
+        render_video(runs, args, view, renderer, out)
 
 
 if __name__ == "__main__":

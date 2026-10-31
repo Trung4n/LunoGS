@@ -21,6 +21,14 @@ PARAMS = {"K": 30.0, "t": [0.0, -0.05, 0.0], "R": [[1, 0, 0], [0, 1, 0], [0, 0, 
 CAM = SimpleNamespace(fx=F, fy=F, cx=W / 2, cy=H / 2)
 
 
+
+def assert_state_close(a, b):
+    """Learnable states {path: value or list} equal up to float tolerance
+    (pytest.approx does not take nested containers in recent versions)."""
+    assert set(a) == set(b)
+    for k in a:
+        assert a[k] == pytest.approx(b[k]), k
+
 def _p(key, **kw):
     return {"source": "params_file", "key": key, "learnable": False, **kw}
 
@@ -113,9 +121,9 @@ def test_state_round_trip_and_pickling():
         a.learnable_params()["angular.half_angle_deg"].tensor.fill_(31.5)
         a.learnable_params()["pose.R_CL"].tensor.copy_(torch.tensor([-1.0, 0.5]))
     b.load_learnable_state(a.learnable_state())
-    assert b.learnable_state() == pytest.approx(a.learnable_state())
+    assert_state_close(b.learnable_state(), a.learnable_state())
     c = pickle.loads(pickle.dumps(a))  # backend / GUI processes get a pickled copy
-    assert c.learnable_state() == pytest.approx(a.learnable_state())
+    assert_state_close(c.learnable_state(), a.learnable_state())
     with pytest.raises(ValueError, match="expects"):
         b.load_learnable_state({"angular.half_angle_deg": 30.0})
 
@@ -243,7 +251,7 @@ def test_own_storage_keeps_objects_and_values_but_unshares_memory():
         assert p.tensor is before[k][0]  # same object: components still see it
         assert p.tensor.data_ptr() != before[k][1]  # new buffer
         assert p.tensor.requires_grad and p.tensor.is_leaf
-    assert sh.learnable_state() == pytest.approx(state)
+    assert_state_close(sh.learnable_state(), state)
 
 
 # ---- at_bound: project (D70) ----------------------------------------------------

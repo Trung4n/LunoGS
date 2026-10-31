@@ -25,6 +25,8 @@ from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
 from utils.logging_utils import Log
 from utils.trajectory_analysis import run_report
 from utils.multiprocessing_utils import FakeQueue, drain_queue
+from utils.record_zip import zip_run
+from utils.run_recorder import read_record_config
 from utils.slam_backend import BackEnd
 from utils.slam_frontend import FrontEnd
 
@@ -486,6 +488,16 @@ if __name__ == "__main__":
 
     slam.run()
     wandb.finish()
+
+    # Zip of the recording for download (D80): written after the backend has
+    # stopped, so every per-run file (light_learned.csv, ...) is complete.
+    record_cfg = read_record_config(config["Results"])
+    if save_dir is not None and record_cfg is not None and record_cfg["zip_dir"] is not None:
+        try:
+            zip_path = zip_run(save_dir, record_cfg["zip_dir"])
+            Log(f"recording zipped: {zip_path} ({os.path.getsize(zip_path) / 2**20:.0f} MB)")
+        except OSError as exc:  # the run's outputs are already on disk
+            Log(f"zipping the recording failed: {exc!r}")
 
     # All done
     Log("Done.")

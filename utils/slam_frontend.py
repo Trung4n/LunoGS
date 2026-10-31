@@ -13,7 +13,7 @@ from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
 from utils.run_recorder import open_recorder
-from light_models.diagnostics import log_pixel_usage
+from light_models.diagnostics import log_pixel_usage, log_timing
 from utils.slam_utils import get_loss_tracking, get_median_depth, pixel_usage_stats
 
 
@@ -300,6 +300,7 @@ class FrontEnd(mp.Process):
                 )
             if converged:
                 break
+        self.last_tracking_iters = tracking_itr + 1  # timing log (D79)
 
         # Typical scene depth at this frame. Keyframe distance thresholds are
         # expressed relative to it (see is_keyframe). Computed from the last
@@ -612,7 +613,11 @@ class FrontEnd(mp.Process):
                 )
 
                 # Tracking
+                t_track = time.perf_counter()
                 render_pkg = self.tracking(cur_frame_idx, viewpoint)
+                torch.cuda.synchronize()
+                log_timing(self.save_dir, "tracking", cur_frame_idx,
+                           1000 * (time.perf_counter() - t_track), self.last_tracking_iters)
                 if self.recorder is not None:
                     # Before cleanup() frees the frame's images.
                     self.recorder.frame(cur_frame_idx, viewpoint, render_pkg, len(self.kf_indices))

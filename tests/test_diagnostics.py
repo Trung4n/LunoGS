@@ -41,3 +41,20 @@ def test_no_file_without_save_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     log_albedo_stats(None, 0, "map", torch.tensor([[1.2, 0.5, 0.5]]))
     assert not (tmp_path / CSV_NAME).exists()
+
+
+def test_timing_csv_and_summary(tmp_path):
+    # D79: tracking per frame, keyframe mapping, background mapping between keyframes
+    from light_models.diagnostics import log_timing, summarize_csv_logs
+
+    d = str(tmp_path)
+    log_timing(None, "tracking", 1, 10.0, 5)  # no save dir: nothing written
+    for i, ms in enumerate([10.0, 20.0, 30.0], start=1):
+        log_timing(d, "tracking", i, ms, 40)
+    log_timing(d, "background", 4, 600.0, 12)
+    log_timing(d, "keyframe", 4, 250.0, 10)
+    log_timing(d, "background", 8, 0.0, 0)
+    lines = "\n".join(summarize_csv_logs(d))
+    assert "tracking per frame over 3: ms p5 10.0000  median 20.0000  p95 30.0000, mean iterations 40.0" in lines
+    assert "keyframe mapping over 1:" in lines
+    assert "background mapping: 12 iterations, 50.0 ms per iteration, 1 s in all" in lines

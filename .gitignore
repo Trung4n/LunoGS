@@ -14,9 +14,11 @@ datasets
 wandb
 
 result*
+record/*
 
 CLAUDE.md
 
 docs/
+reports/
 
 monogs.ipynb

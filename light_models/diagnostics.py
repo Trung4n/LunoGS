@@ -146,6 +146,28 @@ def log_pixel_usage(save_dir, frame_idx, stats):
         f.write(",".join(_format(row.get(c)) for c in _PIXEL_USAGE_COLUMNS) + "\n")
 
 
+TIMING_CSV_NAME = "timing.csv"
+
+
+def log_timing(save_dir, kind, index, ms, iters):
+    """Wall-clock time of one SLAM step (D79), CSV only:
+      tracking   - one frame's pose optimisation (index = frame, iters =
+                   tracking iterations until convergence);
+      keyframe   - mapping of a new keyframe in the backend (index = frame,
+                   iters = mapping iterations, prune pass excluded);
+      background - background mapping since the previous keyframe (index =
+                   the new keyframe, iters = iterations, ms = their total).
+    Logging only; never read by tracking or mapping."""
+    if save_dir is None:
+        return
+    path = os.path.join(save_dir, TIMING_CSV_NAME)
+    write_header = not os.path.exists(path)
+    with open(path, "a", encoding="utf-8") as f:
+        if write_header:
+            f.write("kind,index,ms,iters\n")
+        f.write(f"{kind},{index},{ms:.3f},{iters}\n")
+
+
 LEARNED_CSV_NAME = "light_learned.csv"
 
 
@@ -214,6 +236,20 @@ def summarize_csv_logs(save_dir):
     if expo:
         gains = [float(r["gain_exp_a"]) for r in expo]
         lines.append(f"exposure gain exp(a) over {len(expo)} keyframes: {quantiles(gains)}")
+    timing = rows(TIMING_CSV_NAME)
+    if timing:
+        for kind, what in (("tracking", "tracking per frame"), ("keyframe", "keyframe mapping")):
+            sel = [r for r in timing if r["kind"] == kind]
+            if sel:
+                ms = [float(r["ms"]) for r in sel]
+                it = [int(r["iters"]) for r in sel]
+                lines.append(f"{what} over {len(sel)}: ms {quantiles(ms)}, mean iterations {sum(it) / len(it):.1f}")
+        bg = [r for r in timing if r["kind"] == "background"]
+        n_it = sum(int(r["iters"]) for r in bg)
+        if n_it:
+            total = sum(float(r["ms"]) for r in bg)
+            lines.append(f"background mapping: {n_it} iterations, {total / n_it:.1f} ms per iteration, "
+                         f"{total / 1000:.0f} s in all")
     learned = rows(LEARNED_CSV_NAME)
     if learned:
         cols = [c for c in learned[0] if c not in ("frame_idx", "n_keyframes")]

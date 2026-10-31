@@ -8,6 +8,9 @@
 #   frame_every: <n>                images every n frames (pose: every frame)
 #   map_every_keyframes: <n>        map snapshot every n keyframes
 #   image_width: <px>               width of the stored images
+#   zip_dir: <path> | null          folder for <experiment>__<time>.zip of
+#                                   the run, written by slam.py at the end
+#                                   (utils/record_zip.py); null = no zip
 #
 # Layout under <save_dir>/record/:
 #   meta.json            intrinsics, image size, colour space of the map, ...
@@ -50,7 +53,7 @@ def read_record_config(results_cfg):
     rec = require_key(results_cfg, "record", "Results")
     if not isinstance(rec, dict):
         raise TypeError(f"Results.record must be a block, got {rec!r}")
-    extra = set(rec) - {"enabled", *_INT_KEYS}
+    extra = set(rec) - {"enabled", "zip_dir", *_INT_KEYS}
     if extra:
         raise ValueError(f"Results.record: unexpected keys {sorted(extra)}")
     enabled = require_key(rec, "enabled", "Results.record")
@@ -62,6 +65,10 @@ def read_record_config(results_cfg):
         if isinstance(v, bool) or not isinstance(v, int) or v < 1:
             raise ValueError(f"Results.record.{key} must be an integer >= 1, got {v!r}")
         out[key] = v
+    zip_dir = require_key(rec, "zip_dir", "Results.record")
+    if zip_dir is not None and (not isinstance(zip_dir, str) or not zip_dir):
+        raise ValueError(f"Results.record.zip_dir must be a folder path or null, got {zip_dir!r}")
+    out["zip_dir"] = zip_dir
     return out if enabled else None
 
 
