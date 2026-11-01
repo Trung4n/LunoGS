@@ -42,6 +42,23 @@ def drain_queue(q, tolerate=()):
         n += 1
 
 
+# Seconds a process gets to end after terminate() before kill() (D83).
+TERMINATE_GRACE_S = 10
+
+
+def stop_process(p):
+    """Ends process `p` if it is still alive: terminate (SIGTERM), then kill
+    (SIGKILL) if it ignores that. Returns True if it had to be stopped."""
+    if p is None or not p.is_alive():
+        return False
+    p.terminate()
+    p.join(timeout=TERMINATE_GRACE_S)
+    if p.is_alive():
+        p.kill()
+        p.join(timeout=TERMINATE_GRACE_S)
+    return True
+
+
 def clone_obj(obj):
     clone_obj = copy.deepcopy(obj)
     for attr in clone_obj.__dict__.keys():

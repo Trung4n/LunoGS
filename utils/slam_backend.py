@@ -643,7 +643,14 @@ class BackEnd(mp.Process):
         # Background mapping since the last keyframe (timing log, D79).
         bg_iters, bg_ms = 0, 0.0
         save_dir = self.config["Results"]["save_dir"]
+        # The process that started this one (None when not run as a child).
+        parent = mp.parent_process()
         while True:
+            if parent is not None and not parent.is_alive():
+                # The main process died (crash, kill): stop instead of mapping
+                # on forever and keeping the job alive (D83).
+                Log("main process is gone: backend stops")
+                break
             if self.backend_queue.empty():
                 # Idle cases: paused, nothing to map yet, or no background
                 # mapping (mapping then only happens inside the "keyframe"

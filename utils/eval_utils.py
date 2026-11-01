@@ -149,9 +149,17 @@ def eval_rendering(
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
-        gt_image, _, _ = dataset[idx]
+        gt_image, sensor_depth, _ = dataset[idx]
 
+        # Non-keyframes were cleaned after tracking (Camera.clean): give the
+        # frame back the sensor depth it observed, for normal sources that
+        # read it (sensor_depth_fd, D49); restored right after (D83).
+        cleaned = frame.depth is None
+        if cleaned:
+            frame.depth = sensor_depth
         rendering = render(frame, gaussians, pipe, background, shader=shader)["render"]
+        if cleaned:
+            frame.depth = None
         image = torch.clamp(rendering, 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)

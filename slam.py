@@ -1,5 +1,6 @@
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -24,7 +25,7 @@ from utils.dataset import load_dataset
 from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
 from utils.logging_utils import Log
 from utils.trajectory_analysis import run_report
-from utils.multiprocessing_utils import FakeQueue, drain_queue
+from utils.multiprocessing_utils import FakeQueue, drain_queue, stop_process
 from utils.record_zip import zip_run
 from utils.run_recorder import read_record_config
 from utils.slam_backend import BackEnd
@@ -86,6 +87,10 @@ class SLAM:
         self.eval_rendering = self.config["Results"]["eval_rendering"]
         # Offline color refinement before the after_opt metrics (D61).
         self.color_refinement = require_key(self.config["Results"], "color_refinement", "Results")
+        # Seconds the clean shutdown may wait for the backend before it is
+        # stopped by force (D83): a hung shutdown must not eat a Kaggle session.
+        self.shutdown_timeout_s = require_key(self.config["Results"], "shutdown_timeout_s", "Results")
+        self.backend_process = None
 
         # sh_degree: 0 = only the DC (flat color) term, 3 = full view-dependent color.
         model_params.sh_degree = 3 if self.use_spherical_harmonics else 0
@@ -221,6 +226,8 @@ class SLAM:
         start.record()
 
         backend_process = mp.Process(target=self.backend.run)
+        # Kept for stop_backend(): stopped by force when the run fails (D83).
+        self.backend_process = backend_process
         if self.use_gui:
             gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
             gui_process.start()
@@ -338,7 +345,12 @@ class SLAM:
         _, bad = drain_queue(frontend_queue, tolerate=unreadable)
         Log("Stopping the backend")
         backend_queue.put(["stop"])
+        deadline = time.monotonic() + self.shutdown_timeout_s
         while backend_process.is_alive():
+            if time.monotonic() > deadline:
+                Log(f"backend still alive {self.shutdown_timeout_s} s after stop: stopped by force")
+                self.stop_backend()
+                break
             bad += drain_queue(frontend_queue, tolerate=unreadable)[1]
             backend_process.join(timeout=0.01)
         bad += drain_queue(frontend_queue, tolerate=unreadable)[1]
@@ -349,6 +361,31 @@ class SLAM:
             q_main2vis.put(gui_utils.GaussianPacket(finish=True))
             gui_process.join()
             Log("GUI Stopped and joined the main thread")
+
+
+    def stop_backend(self):
+        """Ends the backend process if it is still alive: after a failure of
+        the run (an exception, SIGTERM) or a hung shutdown. Without it, Python
+        waits forever at exit for the non-daemon backend, and a crashed
+        Kaggle run hangs until the session limit (D83)."""
+        if stop_process(self.backend_process):
+            Log("backend process stopped")
+
+
+def zip_recording(config, save_dir):
+    """Zip of the recording for download (D80), written after the backend has
+    stopped, so every per-run file (light_learned.csv, ...) is complete. A
+    failure is logged only: the run's outputs are already on disk."""
+    record_cfg = read_record_config(config["Results"])
+    if save_dir is None or record_cfg is None or record_cfg["zip_dir"] is None:
+        return
+    if not os.path.isfile(os.path.join(save_dir, "record", "meta.json")):
+        return  # the run failed before the recorder started
+    try:
+        zip_path = zip_run(save_dir, record_cfg["zip_dir"])
+        Log(f"recording zipped: {zip_path} ({os.path.getsize(zip_path) / 2**20:.0f} MB)")
+    except OSError as exc:
+        Log(f"zipping the recording failed: {exc!r}")
 
 
 def save_git_state(save_dir):
@@ -489,18 +526,17 @@ if __name__ == "__main__":
 
     slam = SLAM(config, save_dir=save_dir)
 
-    slam.run()
+    # SIGTERM (e.g. `timeout` in the notebook) as an exception, so the
+    # finally below runs and the backend is stopped too (D83).
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    try:
+        slam.run()
+    finally:
+        slam.stop_backend()
+        # Also when the run failed after tracking (e.g. in the rendering
+        # evaluation): the recording is then complete and still worth having.
+        zip_recording(config, save_dir)
     wandb.finish()
-
-    # Zip of the recording for download (D80): written after the backend has
-    # stopped, so every per-run file (light_learned.csv, ...) is complete.
-    record_cfg = read_record_config(config["Results"])
-    if save_dir is not None and record_cfg is not None and record_cfg["zip_dir"] is not None:
-        try:
-            zip_path = zip_run(save_dir, record_cfg["zip_dir"])
-            Log(f"recording zipped: {zip_path} ({os.path.getsize(zip_path) / 2**20:.0f} MB)")
-        except OSError as exc:  # the run's outputs are already on disk
-            Log(f"zipping the recording failed: {exc!r}")
 
     # All done
     Log("Done.")

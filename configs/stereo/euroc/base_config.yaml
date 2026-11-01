@@ -10,6 +10,9 @@ Results:
   # frozen) before the after_opt rendering metrics. Does not change the ATE.
   # slam.py --skip_color_refinement sets it to False (D61).
   color_refinement: True
+  # Seconds the shutdown waits for the backend before stopping it by
+  # force (D83); also guards the Kaggle session against a hung run.
+  shutdown_timeout_s: 600
   # Recording of the run for offline replay videos (utils/run_recorder.py,
   # tools/viz/render_replay.py, docs/DECISIONS.md D76). Off = original MonoGS;
   # slam.py --record switches it on. Logging only, never read by SLAM.
