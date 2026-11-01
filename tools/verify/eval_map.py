@@ -178,7 +178,7 @@ class MapRenderer:
         m._features_rest = torch.zeros(m._xyz.shape[0], 0, 3, device="cuda")
         self.model = m
 
-    def __call__(self, c2w, sensor_depth):
+    def _camera(self, c2w, sensor_depth):
         torch, it = self.torch, self.intr
         w, h = int(it["width"]), int(it["height"])
         fovx = 2 * math.atan(w / (2 * it["fx"]))
@@ -188,7 +188,51 @@ class MapRenderer:
         w2c = np.linalg.inv(c2w)
         cam.update_RT(torch.tensor(w2c[:3, :3], dtype=torch.float32, device="cuda"),
                       torch.tensor(w2c[:3, 3], dtype=torch.float32, device="cuda"))
-        cam.depth = sensor_depth  # read only by sensor-depth normal sources (lambert)
+        cam.depth = sensor_depth  # sensor-depth normal sources (lambert), RGB-D tracking loss
+        return cam
+
+    def refit_pose(self, c2w, sensor_depth, observed, config, max_steps):
+        """Tracks the frame again against THIS map from `c2w` (D88), exactly as
+        FrontEnd.tracking: its loss (get_loss_tracking), Adam on the pose
+        delta and the exposure with the same learning rates, update_pose's
+        stop rule, at most `max_steps` steps (tracking: Training.
+        tracking_itr_num). Returns
+        (refitted c2w, steps). The map and the light are not changed."""
+        from utils.pose_utils import update_pose
+        from utils.slam_utils import get_loss_tracking
+
+        torch = self.torch
+        cam = self._camera(c2w, sensor_depth)
+        cam.original_image = torch.tensor(np.ascontiguousarray(observed.transpose(2, 0, 1)),
+                                          dtype=torch.float32, device="cuda")
+        cam.compute_grad_mask(config)  # as FrontEnd does for every frame
+        lr = config["Training"]["lr"]
+        opt = torch.optim.Adam([
+            {"params": [cam.cam_rot_delta], "lr": lr["cam_rot_delta"]},
+            {"params": [cam.cam_trans_delta], "lr": lr["cam_trans_delta"]},
+            # the exposure learning rate of FrontEnd.tracking (no gradient
+            # when LightTracking.exposure_affine is false)
+            {"params": [cam.exposure_a], "lr": 0.01},
+            {"params": [cam.exposure_b], "lr": 0.01},
+        ])
+        steps = 0
+        for steps in range(1, max_steps + 1):
+            pkg = self.render(cam, self.model, self.pipe, self.bg, shader=self.shader)
+            opt.zero_grad()
+            get_loss_tracking(config, pkg, cam).backward()
+            with torch.no_grad():
+                opt.step()
+                converged = update_pose(cam)
+            if converged:
+                break
+        w2c = np.eye(4)
+        w2c[:3, :3] = cam.R.detach().cpu().numpy()
+        w2c[:3, 3] = cam.T.detach().cpu().numpy()
+        return np.linalg.inv(w2c), steps
+
+    def __call__(self, c2w, sensor_depth):
+        torch = self.torch
+        cam = self._camera(c2w, sensor_depth)
         with torch.no_grad():
             pkg = self.render(cam, self.model, self.pipe, self.bg, shader=self.shader)
         hwc = lambda t: t.detach().float().permute(1, 2, 0).cpu().numpy()  # noqa: E731
@@ -220,6 +264,8 @@ def run(args):
     intr = meta["intrinsics"]
     config = load_config(args.config)
     config["Dataset"]["dataset_path"] = args.dataset
+    # as slam.py sets it (read by the tracking loss of --refit_pose)
+    config["Training"]["monocular"] = config["Dataset"]["sensor_type"] == "monocular"
     depth_scale = config["Dataset"]["Calibration"]["depth_scale"]
     shader = build_shader(config)
     if shader is not None and args.light_csv:
@@ -245,11 +291,21 @@ def run(args):
     def load_rgb(path):
         return np.asarray(Image.open(path).convert("RGB"), np.float64) / 255.0
 
+    refit = {}  # frame -> (refitted c2w, steps), --refit_pose (D88)
+    refit_steps = args.refit_steps or config["Training"]["tracking_itr_num"]
+
+    def pose_of(i, obs, depth):
+        if not args.refit_pose:
+            return poses[i]
+        if i not in refit:
+            refit[i] = renderer.refit_pose(poses[i], depth, obs, config, refit_steps)
+        return refit[i][0]
+
     def frame_data(i):
         obs = load_rgb(os.path.join(args.dataset, "results", f"frame{i:06d}.jpg"))
         depth = np.asarray(Image.open(os.path.join(args.dataset, "results", f"depth{i:06d}.png")),
                            np.float64) / depth_scale
-        image, colour, opacity = renderer(poses[i], depth)
+        image, colour, opacity = renderer(pose_of(i, obs, depth), depth)
         alb_gt = srgb_to_linear(load_rgb(os.path.join(args.renders, "passes", "albedo_png", f"albedo{i:06d}.png")))
         even_gt = srgb_to_linear(load_rgb(os.path.join(args.renders, "even", "rgb_png", f"frame{i:06d}.png")))
         return obs, depth, image, colour, opacity > args.min_opacity, alb_gt, even_gt
@@ -273,6 +329,13 @@ def run(args):
                      "lit_psnr_sat": psnr(image, obs, sat & covered),
                      "coverage": float(covered.mean()), "cone_fraction": float(cone.mean()),
                      "sat_fraction": float(sat.mean())})
+        if args.refit_pose:
+            # how far the frame's pose moved to fit the final map
+            delta = np.linalg.inv(poses[i]) @ refit[i][0]
+            rows[-1].update({
+                "refit_dt_cm": float(100 * np.linalg.norm(delta[:3, 3])),
+                "refit_drot_deg": float(np.degrees(np.arccos(np.clip((np.trace(delta[:3, :3]) - 1) / 2, -1, 1)))),
+                "refit_steps": refit[i][1]})
         if n % 50 == 0:
             print(f"  pass 1: frame {i} ({n + 1}/{len(frames)})", flush=True)
 
@@ -319,7 +382,8 @@ def run(args):
         "record": os.path.abspath(rec), "dataset": os.path.abspath(args.dataset), "config": args.config,
         "renders": os.path.abspath(args.renders),
         "light_csv": os.path.abspath(args.light_csv) if args.light_csv else None,
-        "map": args.map, "frames": len(rows), "interval": args.interval, "gaussians": int(len(snap["xyz"])),
+        "map": args.map, "refit_pose": bool(args.refit_pose),
+        "refit_steps": refit_steps if args.refit_pose else None, "frames": len(rows), "interval": args.interval, "gaussians": int(len(snap["xyz"])),
         "gain_albedo": g_alb.tolist(), "gain_even": g_even.tolist(),
         **{k: mean(k) for k in rows[0] if k != "frame"},
     }
@@ -396,6 +460,12 @@ def main(argv=None):
     r.add_argument("--map", default="final", choices=["final", "final_refined"],
                    help="final: the online map; final_refined: after the offline color refinement (D81)")
     r.add_argument("--label", default=None)
+    r.add_argument("--refit_pose", action="store_true",
+                   help="track every frame again against the final map before measuring (D88): "
+                   "map quality without the pose / map inconsistency")
+    r.add_argument("--refit_steps", type=int, default=None,
+                   help="with --refit_pose: maximum steps per frame instead of Training.tracking_itr_num "
+                   "(to check convergence; recorded in metrics.json)")
     r.add_argument("--interval", type=int, default=5, help="as MonoGS eval_rendering")
     r.add_argument("--min_opacity", type=float, default=0.5, help="rendered opacity for a pixel to count")
     r.add_argument("--sat_8bit", type=int, required=True,

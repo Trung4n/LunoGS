@@ -212,6 +212,7 @@ def test_light_config_set():
         "rgbd_nocos_learn_spline_narrow.yaml",
         "rgbd_lambert_learn_spline_flat.yaml",
         "rgbd_nocos_selfcal.yaml",
+        "rgbd_lambert_selfcal.yaml",
         "rgbd_nocos_depth_noise.yaml",
         "rgbd_nocos_depth_noise_heavy.yaml",
         "verify_shading.yaml",

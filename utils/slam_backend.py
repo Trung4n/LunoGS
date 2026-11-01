@@ -7,14 +7,13 @@ from tqdm import tqdm
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.scene.gaussian_model import GaussianModel
-from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj, drain_queue
 from utils.pose_utils import update_pose
-from utils.slam_utils import get_loss_images, get_loss_mapping
+from utils.slam_utils import get_loss_mapping, get_loss_refinement
 
 class BackEnd(mp.Process):
     """Mapping half of the SLAM system (runs in its own process).
@@ -598,13 +597,9 @@ class BackEnd(mp.Process):
                 render_pkg["radii"],
             )
 
-            # L1 + D-SSIM in LightTracking.loss_color_space, like the SLAM
-            # losses. Still no exposure affine here, as in the baseline.
-            image, gt_image = get_loss_images(self.config, render_pkg, viewpoint_cam)
-            Ll1 = l1_loss(image, gt_image)
-            loss = (1.0 - self.opt_params.lambda_dssim) * (
-                Ll1
-            ) + self.opt_params.lambda_dssim * (1.0 - ssim(image, gt_image))
+            # L1 + D-SSIM in LightTracking.loss_color_space with the mapping
+            # weight (D87); still no exposure affine, as in the baseline.
+            loss = get_loss_refinement(self.config, render_pkg, viewpoint_cam, self.opt_params.lambda_dssim)
             loss.backward()
             with torch.no_grad():
                 self.gaussians.max_radii2D[visibility_filter] = torch.max(

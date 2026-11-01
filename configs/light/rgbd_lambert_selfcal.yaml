@@ -1,0 +1,26 @@
+# Self-calibration mode with the Lambert term (docs/DECISIONS.md D87):
+# rgbd_nocos_selfcal.yaml (only the light position t_CL measured; K = 1, c',
+# the emission spline from a flat start and the 2 tilts learned in MAPPING)
+# plus max(0, n . l) with normals from the sensor depth, exactly the cosine
+# block and pixel weight of rgbd_lambert.yaml.
+#
+# Why: with fixed calibrated values lambert gives the same ATE as nocos and a
+# better map (D84, D86), so it is the candidate main model; it had only been
+# self-calibrated partially (600 frames: all parameters from calibrated
+# starts, D68; the spline from a flat start, D71, which recovered the Blender
+# profile within 0.02). Expected under lambert (D68, D71): c' close to the
+# physical c / K (0.00393, D74) instead of the effective nocos value, and a
+# spline core at 1.
+inherit_from: "configs/light/rgbd_nocos_selfcal.yaml"
+
+Light:
+  cosine:
+    type: lambert
+    normal_source: {type: sensor_depth_fd, stencil_px: 1}
+    warmup_keyframes: 0
+
+LightTracking:
+  pixel_weight:
+    enabled: True
+    apply_to: [tracking, mapping]
+    min_cos_nl: 0.3

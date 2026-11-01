@@ -1,5 +1,6 @@
 import torch
 
+from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from light_models import read_light_tracking
 from utils.color_space import sRGB2Linear
 from utils.config_utils import require_key
@@ -412,6 +413,20 @@ def get_loss_mapping_rgbd(config, image, gt_image, depth, viewpoint, pixel_weigh
     l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
 
     return alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean()
+
+
+def get_loss_refinement(config, render_pkg, viewpoint, lambda_dssim):
+    # Offline color refinement (BackEnd.color_refinement): L1 + D-SSIM in the
+    # loss color space, no exposure affine, as the baseline. The mapping weight
+    # (saturation mask, n . l weight) applies too: refinement is mapping with
+    # fixed poses, and without it the clipped saturated observations pull the
+    # albedo down (D87). Masked pixels are zeroed in both images, so they give
+    # no gradient. No weight applies (baseline): the baseline loss, op for op.
+    image, gt_image = get_loss_images(config, render_pkg, viewpoint)
+    weight = get_loss_weight(config, render_pkg, viewpoint, "mapping")
+    if weight is not None:
+        image, gt_image = image * weight, gt_image * weight
+    return (1.0 - lambda_dssim) * l1_loss(image, gt_image) + lambda_dssim * (1.0 - ssim(image, gt_image))
 
 
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
