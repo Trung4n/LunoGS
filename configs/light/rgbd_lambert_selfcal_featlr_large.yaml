@@ -1,0 +1,12 @@
+# Albedo learning-rate test, the converse of rgbd_lambert_featlr_small.yaml
+# (docs/DECISIONS.md D90, D91): rgbd_lambert_selfcal.yaml (K = 1, albedo
+# about 22x larger) with the colour learning rate multiplied by the same
+# ratio, i.e. the relative albedo step of the calibrated lambert runs.
+#
+# 0.0025 * 22.2 (= 2.137 / 0.0963, see rgbd_lambert_featlr_small.yaml). If
+# the Gaussian count and the map quality drop towards rgbd_lambert, the
+# relative colour step drives the densification (D90).
+inherit_from: "configs/light/rgbd_lambert_selfcal.yaml"
+
+opt_params:
+  feature_lr: 0.0555

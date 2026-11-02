@@ -238,6 +238,9 @@ def figure(path, runs, ceilings=()):
     """Four stacked panels sharing the frame axis, one quantity (one y-axis)
     each; runs in fixed categorical order, model ceilings dashed gray; legend
     plus end labels."""
+    if len(runs) > len(SERIES):
+        # fixed categorical slots, never cycled: draw a selection instead
+        raise ValueError(f"{len(runs)} runs for {len(SERIES)} colours: pass at most {len(SERIES)} (--metrics / --run)")
     import matplotlib
 
     matplotlib.use("Agg")

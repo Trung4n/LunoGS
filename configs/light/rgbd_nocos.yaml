@@ -55,3 +55,11 @@ LightTracking:
     # (also Verify.layer1.saturation_8bit). Confirmed 2026-09-30 (D44).
     threshold_8bit: 250
     apply_to: [tracking, mapping]
+
+Results:
+  # The offline color refinement (--eval without --skip_color_refinement)
+  # refines only the albedo (D89): the shading depends on the geometry, and
+  # refining positions / opacity / scales with the photometric loss alone (no
+  # depth term) wrecked the map (lambert: after_opt PSNR 30.97 -> 13.39,
+  # median opacity 0.98 -> 0.25; nocos: opacity 0.97 -> 0.16).
+  color_refinement_params: [f_dc]

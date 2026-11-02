@@ -13,7 +13,7 @@ from light_models.learning import LightLearner
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj, drain_queue
 from utils.pose_utils import update_pose
-from utils.slam_utils import get_loss_mapping, get_loss_refinement
+from utils.slam_utils import get_loss_mapping, get_loss_refinement, read_refinement_params
 
 class BackEnd(mp.Process):
     """Mapping half of the SLAM system (runs in its own process).
@@ -572,7 +572,16 @@ class BackEnd(mp.Process):
         # LightTracking.exposure_affine says), no
         # densification (max_radii2D is updated but unused). The xyz learning
         # rate schedule restarts from iteration 1.
-        Log("Starting color refinement")
+        # Only the groups of Results.color_refinement_params are refined (D89):
+        # all of them in MonoGS; the albedo only with a light model, whose
+        # shading depends on the geometry (refining it without a depth term
+        # wrecked the map). The other groups get no gradient.
+        refined = read_refinement_params(self.config["Results"])
+        Log(f"Starting color refinement of {refined}")
+        for group in self.gaussians.optimizer.param_groups:
+            if group["name"] not in refined:
+                for p in group["params"]:
+                    p.requires_grad_(False)
         if self.shader is not None:
             # The light is not refined offline: fixed at its learned value.
             self.shader.set_learning(False)

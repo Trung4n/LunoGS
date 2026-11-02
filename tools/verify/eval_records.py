@@ -158,9 +158,14 @@ def main(argv=None):
                 if "record" in json.load(f):
                     with_record.append(m)
         if with_record:
-            diagnose_map.main(["--metrics", *with_record, "--sat_8bit", str(args.sat_8bit),
-                               "--rpe_delta", str(args.rpe_delta), "--segment", str(args.segment),
-                               "--figure", os.path.join(args.out, scene, "diagnosis.png")])
+            argv = ["--metrics", *with_record, "--sat_8bit", str(args.sat_8bit),
+                    "--rpe_delta", str(args.rpe_delta), "--segment", str(args.segment)]
+            if len(with_record) <= len(diagnose_map.SERIES):
+                argv += ["--figure", os.path.join(args.out, scene, "diagnosis.png")]
+            else:
+                print(f"diagnosis figure skipped: {len(with_record)} runs, at most {len(diagnose_map.SERIES)} per "
+                      "figure; draw a selection with tools/analysis/diagnose_map.py --metrics ...")
+            diagnose_map.main(argv)
 
 
 if __name__ == "__main__":

@@ -429,6 +429,22 @@ def get_loss_refinement(config, render_pkg, viewpoint, lambda_dssim):
     return (1.0 - lambda_dssim) * l1_loss(image, gt_image) + lambda_dssim * (1.0 - ssim(image, gt_image))
 
 
+# Optimizer groups of GaussianModel.training_setup that the offline color
+# refinement may optimize (Results.color_refinement_params, D89).
+REFINABLE_GROUPS = ("xyz", "f_dc", "f_rest", "opacity", "scaling", "rotation")
+
+
+def read_refinement_params(results_cfg):
+    """Results.color_refinement_params as a list of optimizer group names
+    (required, non-empty, known names)."""
+    params = require_key(results_cfg, "color_refinement_params", "Results")
+    if not isinstance(params, list) or not params or not set(params) <= set(REFINABLE_GROUPS):
+        raise ValueError(
+            f"Results.color_refinement_params must be a non-empty list of {list(REFINABLE_GROUPS)}, got {params!r}"
+        )
+    return params
+
+
 def get_median_depth(depth, opacity=None, mask=None, return_std=False):
     # Robust "typical scene depth" of a RENDERED depth map, over pixels that
     # have positive depth, are well covered by the map (opacity > 0.95) and

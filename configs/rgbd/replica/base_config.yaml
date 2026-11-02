@@ -12,6 +12,9 @@ Results:
   # Seconds the shutdown waits for the backend before stopping it by
   # force (D83); also guards the Kaggle session against a hung run.
   shutdown_timeout_s: 600
+  # Gaussian parameters the offline color refinement optimizes (optimizer
+  # group names, D89); all six = original MonoGS.
+  color_refinement_params: [xyz, f_dc, f_rest, opacity, scaling, rotation]
   # Recording of the run for offline replay videos (utils/run_recorder.py,
   # tools/viz/render_replay.py, docs/DECISIONS.md D76). Off = original MonoGS;
   # slam.py --record switches it on. Logging only, never read by SLAM.

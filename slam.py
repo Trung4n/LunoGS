@@ -29,6 +29,7 @@ from utils.multiprocessing_utils import FakeQueue, drain_queue, stop_process
 from utils.record_zip import zip_run
 from utils.run_recorder import read_record_config
 from utils.slam_backend import BackEnd
+from utils.slam_utils import read_refinement_params
 from utils.slam_frontend import FrontEnd
 
 
@@ -87,6 +88,8 @@ class SLAM:
         self.eval_rendering = self.config["Results"]["eval_rendering"]
         # Offline color refinement before the after_opt metrics (D61).
         self.color_refinement = require_key(self.config["Results"], "color_refinement", "Results")
+        # Checked now: a bad value must not wait for the end of a long run (D89).
+        read_refinement_params(self.config["Results"])
         # Seconds the clean shutdown may wait for the backend before it is
         # stopped by force (D83): a hung shutdown must not eat a Kaggle session.
         self.shutdown_timeout_s = require_key(self.config["Results"], "shutdown_timeout_s", "Results")

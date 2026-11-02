@@ -1,0 +1,20 @@
+# Albedo learning-rate test (docs/DECISIONS.md D90, D91): rgbd_lambert.yaml
+# with the colour learning rate divided by the albedo scale ratio between
+# the self-calibrated and the calibrated lambert maps.
+#
+# Hypothesis (D90): opt_params.feature_lr is an absolute Adam step on the SH
+# DC coefficient, i.e. a fixed albedo step of C0 * lr. A small albedo (K
+# calibrated, mean 0.096) moves by a large RELATIVE step per iteration, the
+# colours fit fast, the image residual stays small, few Gaussians are
+# densified (46-50 k); with K = 1 (selfcal, mean 2.14) the relative step is
+# 22x smaller and the map gets 104-117 k Gaussians and a better albedo.
+#
+# 0.0025 / 22.2 (= 2.137 / 0.0963, mean albedo after the last keyframe in
+# albedo_stats.csv of rgbd_lambert_selfcal 17:09 and rgbd_lambert 20:11):
+# the relative albedo step of the self-calibrated runs. If the Gaussian count
+# and the map quality rise towards rgbd_lambert_selfcal, the gain of D90 is
+# the albedo scale, not the self-calibration.
+inherit_from: "configs/light/rgbd_lambert.yaml"
+
+opt_params:
+  feature_lr: 0.000113
