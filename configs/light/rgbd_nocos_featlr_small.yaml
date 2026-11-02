@@ -1,0 +1,7 @@
+# rgbd_nocos.yaml with the colour learning rate of rgbd_lambert_featlr_small.yaml
+# (docs/DECISIONS.md D92): the n.l ablation must run at the same relative
+# albedo step as the lambert model it is compared with.
+inherit_from: "configs/light/rgbd_nocos.yaml"
+
+opt_params:
+  feature_lr: 0.000113

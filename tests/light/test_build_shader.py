@@ -215,6 +215,7 @@ def test_light_config_set():
         "rgbd_lambert_selfcal.yaml",
         "rgbd_lambert_featlr_small.yaml",
         "rgbd_lambert_selfcal_featlr_large.yaml",
+        "rgbd_nocos_featlr_small.yaml",
         "rgbd_nocos_depth_noise.yaml",
         "rgbd_nocos_depth_noise_heavy.yaml",
         "verify_shading.yaml",
