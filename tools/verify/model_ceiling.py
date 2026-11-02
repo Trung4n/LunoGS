@@ -73,9 +73,22 @@ def pooled_psnr(sq_err_sum, n):
     return float("inf") if mse == 0 else 10.0 * math.log10(1.0 / mse)
 
 
-def frame_model_data(config, params, frame_dir, sat_8bit):
+def sensor_depth(config, dataset_dir, frame_dir):
+    """The RGB-D sensor depth SLAM reads for this frame (MonoGS dataset
+    results/depth*.png / Dataset.Calibration.depth_scale), for normal sources
+    that need camera.depth (sensor_depth_fd)."""
+    from PIL import Image
+
+    i = int(os.path.basename(os.path.normpath(frame_dir))[len("frame"):])
+    png = np.asarray(Image.open(os.path.join(dataset_dir, "results", f"depth{i:06d}.png")), np.float64)
+    return png / config["Dataset"]["Calibration"]["depth_scale"]
+
+
+def frame_model_data(config, params, frame_dir, sat_8bit, sensor_depth_dir=None):
     """One frame: valid-pixel world points, observed (linear, sRGB), the
-    model prediction (linear), region masks."""
+    model prediction (linear), region masks. With sensor_depth_dir the
+    camera carries the sensor depth of that MonoGS dataset (sensor_depth_fd);
+    the shading geometry still uses the ground-truth depth."""
     import torch
 
     from light_models import build_shader
@@ -85,10 +98,17 @@ def frame_model_data(config, params, frame_dir, sat_8bit):
     rgb8, alb8, z, n_gt = load_frame(frame_dir)
     c2w = np.load(os.path.join(frame_dir, "c2w.npy"))
     cam = camera_from_config(config)
+    if sensor_depth_dir is not None:
+        cam.depth = torch.from_numpy(sensor_depth(config, sensor_depth_dir, frame_dir))
     gb = gbuffer_from_gt(alb8, z, n_gt)
-    pred = build_shader(config, params)(gb, cam)["radiance_linear"].permute(1, 2, 0).numpy()
+    out = build_shader(config, params)(gb, cam)
+    pred = out["radiance_linear"].permute(1, 2, 0).numpy()
     cos_th, cos_a, _, pts = light_geometry(config, params, cam, z)
     valid = (z > 0) & (np.abs(n_gt).sum(-1) > 0)
+    if "light_normal_valid" in out:
+        # pixels the normal source gives no normal (sensor depth edges): the
+        # shading has no n . l there, SLAM leaves them out of its losses
+        valid &= out["light_normal_valid"][0].numpy().astype(bool)
     cam_pts = pts.permute(1, 2, 0).numpy()[valid]
     world = cam_pts @ c2w[:3, :3].T + c2w[:3, 3]
     obs_srgb = rgb8[valid] / 255.0
@@ -110,11 +130,13 @@ def run(args):
     if args.max_frames:
         frames = frames[: args.max_frames]
     result = {"bundle": args.bundle, "frames": len(frames), "voxel_m": args.voxel_m,
-              "min_views": args.min_views, "sat_8bit": args.sat_8bit, "models": {}}
+              "min_views": args.min_views, "sat_8bit": args.sat_8bit, "sensor_depth": args.sensor_depth,
+              "models": {}}
     per_frame = {}
     for name, cfg_path in models.items():
         config = load_config(cfg_path)
-        data = lambda fr: frame_model_data(config, params, os.path.join(args.bundle, fr), args.sat_8bit)  # noqa: E731
+        data = lambda fr: frame_model_data(config, params, os.path.join(args.bundle, fr), args.sat_8bit,  # noqa: E731
+                                           args.sensor_depth)
         # pass 1: per-voxel sums over unsaturated observations, reduced per
         # frame (one row per voxel and frame) to keep the memory small
         keys_all, op_all, pp_all, fid_all = [], [], [], []
@@ -203,6 +225,9 @@ def main(argv=None):
     ap.add_argument("--voxel_m", type=float, required=True)
     ap.add_argument("--min_views", type=int, required=True)
     ap.add_argument("--sat_8bit", type=int, required=True, help="saturated if any channel >= this")
+    ap.add_argument("--sensor_depth", default=None,
+                    help="MonoGS dataset dir: its results/depth*.png is the camera's sensor depth "
+                         "(needed by normal_source sensor_depth_fd)")
     ap.add_argument("--max_frames", type=int, default=None)
     ap.add_argument("--out", default=None)
     run(ap.parse_args(argv))

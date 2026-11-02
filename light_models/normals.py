@@ -58,6 +58,63 @@ class DepthFiniteDifference:
         return n, ok
 
 
+def _shift(x, k, dim, forward):
+    """x shifted by k along dim (forward: element i holds x[i+k]), and the
+    (H,W) mask of the elements that have such a neighbour in the image."""
+    n = x.shape[dim]
+    out = torch.zeros_like(x)
+    has = torch.zeros(x.shape[-2:], dtype=torch.bool, device=x.device)
+    hdim = dim - (x.dim() - 2)  # the same axis in the (H,W) mask
+    if forward:
+        out.narrow(dim, 0, n - k).copy_(x.narrow(dim, k, n - k))
+        has.narrow(hdim, 0, n - k).fill_(True)
+    else:
+        out.narrow(dim, k, n - k).copy_(x.narrow(dim, 0, n - k))
+        has.narrow(hdim, k, n - k).fill_(True)
+    return out, has
+
+
+@register("normals", "depth_fd_edge", options=("stencil_px",))
+class EdgeAwareDepthFiniteDifference(DepthFiniteDifference):
+    """depth_fd with ONE-SIDED differences chosen per pixel and axis: of
+    P[u+k]-P[u] and P[u]-P[u-k] the one with the smaller depth step |dz|,
+    i.e. the side that does not cross a depth edge (docs/DECISIONS.md D94).
+
+    Why: the central difference at a pixel next to an occlusion edge takes
+    a point of the OTHER surface; on office0, 98% of the squared shading
+    error of sensor_depth_fd normals is within 1 pixel of a depth step
+    (D93). On a plane both sides give the same direction, so this matches
+    depth_fd there; the baseline is k instead of 2k (noisier on noisy
+    depth). A side is usable if its neighbour is valid and inside the image;
+    the pixel is invalid only if an axis has no usable side, or the cross
+    product is exactly zero. Ties (equal |dz|) take the forward side."""
+
+    def __call__(self, points, valid, gbuffer, camera):
+        k = self.k
+        diffs = []
+        ok = valid.clone()
+        for dim in (2, 1):  # u (columns), then v (rows)
+            nxt, has_n = _shift(points, k, dim, forward=True)
+            prv, has_p = _shift(points, k, dim, forward=False)
+            v_n, _ = _shift(valid, k, dim - 1, forward=True)
+            v_p, _ = _shift(valid, k, dim - 1, forward=False)
+            fwd, bwd = nxt - points, points - prv
+            use_f = has_n & v_n
+            use_b = has_p & v_p
+            take_f = use_f & (~use_b | (fwd[2].abs() <= bwd[2].abs()))
+            diffs.append(torch.where(take_f[None], fwd, bwd))
+            ok &= use_f | use_b
+        n = torch.cross(diffs[0], diffs[1], dim=0)
+        norm = n.norm(dim=0)
+        ok &= norm > 0
+        # Division only where the norm is known to be > 0 (no epsilon).
+        n = n / torch.where(ok, norm, torch.ones_like(norm))
+        facing_away = (n * points).sum(0) > 0
+        n = torch.where(facing_away[None], -n, n)
+        n = torch.where(ok[None], n, torch.zeros_like(n))
+        return n, ok
+
+
 @register("normals", "gbuffer")
 class GBufferNormals:
     """Normals supplied in the G-buffer itself (gbuffer["normal"],
@@ -100,9 +157,10 @@ class SensorDepthFiniteDifference:
     result is also restricted to the pixels the G-buffer trusts (`valid`)."""
 
     requires_sensor_depth = True
+    fd_class = DepthFiniteDifference
 
     def __init__(self, stencil_px):
-        self.fd = DepthFiniteDifference(stencil_px)
+        self.fd = self.fd_class(stencil_px)
         # Runtime cache, not configuration: normals of the last camera seen
         # (tracking renders the same frame for every iteration). One entry
         # only: mapping cycles through many keyframes.
@@ -142,6 +200,14 @@ class SensorDepthFiniteDifference:
             self._cache_key = (camera, depth, points.device, points.dtype)
         n, ok = self._cache
         return n, ok & valid
+
+
+@register("normals", "sensor_depth_fd_edge", options=("stencil_px",))
+class SensorDepthEdgeAwareFiniteDifference(SensorDepthFiniteDifference):
+    """sensor_depth_fd with the edge-aware one-sided differences of
+    depth_fd_edge (docs/DECISIONS.md D94). RGB-D only."""
+
+    fd_class = EdgeAwareDepthFiniteDifference
 
 
 # shortest_axis: normal = shortest axis of each Gaussian, rasterized.

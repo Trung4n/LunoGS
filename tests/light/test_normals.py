@@ -101,3 +101,69 @@ def test_sensor_depth_normals_need_a_depth_and_cache_per_camera():
     cam.depth = None
     with pytest.raises(ValueError, match="sensor depth"):
         src(pts, valid, None, cam)
+
+
+# depth_fd_edge / sensor_depth_fd_edge: one-sided differences that do not
+# cross depth edges (D94).
+
+def _step(h=30, w=40, u_edge=20, near=1.5, far=3.0):
+    # Two fronto-parallel planes: z = near left of column u_edge, far right.
+    v, u = torch.meshgrid(torch.arange(h, dtype=torch.float64),
+                          torch.arange(w, dtype=torch.float64), indexing="ij")
+    z = torch.where(u < u_edge, torch.full_like(u, near), torch.full_like(u, far))
+    xn, yn = (u - w / 2) / 50.0, (v - h / 2) / 50.0
+    return torch.stack([xn * z, yn * z, z])
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_edge_aware_matches_central_on_a_plane(k):
+    from light_models.normals import EdgeAwareDepthFiniteDifference
+
+    pts, n_true = _plane()
+    valid = torch.ones(pts.shape[1:], dtype=torch.bool)
+    n, ok = EdgeAwareDepthFiniteDifference(stencil_px=k)(pts, valid, None, None)
+    # One-sided differences reach the image border too.
+    assert ok.all()
+    torch.testing.assert_close(n, n_true[:, None, None].expand_as(n))
+
+
+def test_edge_aware_does_not_cross_a_depth_edge():
+    from light_models.normals import EdgeAwareDepthFiniteDifference
+
+    pts = _step()
+    valid = torch.ones(pts.shape[1:], dtype=torch.bool)
+    facing = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float64)
+    n_c, ok_c = DepthFiniteDifference(stencil_px=1)(pts, valid, None, None)
+    n_e, ok_e = EdgeAwareDepthFiniteDifference(stencil_px=1)(pts, valid, None, None)
+    rows = slice(1, -1)
+    for col in (19, 20):  # the two columns on either side of the step
+        # central: tilted by the other surface
+        assert (n_c[:, rows, col] * facing[:, None]).sum(0).max() < 0.9
+        torch.testing.assert_close(n_e[:, rows, col], facing[:, None].expand(3, 28))
+    assert ok_c[rows, 19].all() and ok_e[rows, 19].all()
+
+
+def test_edge_aware_uses_the_valid_side():
+    from light_models.normals import EdgeAwareDepthFiniteDifference
+
+    pts, n_true = _plane()
+    valid = torch.ones(pts.shape[1:], dtype=torch.bool)
+    valid[:, 10] = False  # e.g. no sensor reading
+    n_c, ok_c = DepthFiniteDifference(stencil_px=1)(pts, valid, None, None)
+    n_e, ok_e = EdgeAwareDepthFiniteDifference(stencil_px=1)(pts, valid, None, None)
+    assert not ok_c[5:-5, 9].any() and not ok_c[5:-5, 11].any()
+    assert ok_e[:, 9].all() and ok_e[:, 11].all() and not ok_e[:, 10].any()
+    torch.testing.assert_close(n_e[:, ok_e], n_true[:, None].expand(3, int(ok_e.sum())))
+
+
+def test_sensor_edge_source_uses_edge_aware_differences():
+    from light_models.normals import EdgeAwareDepthFiniteDifference, SensorDepthEdgeAwareFiniteDifference
+
+    cam, pts, _ = _sensor_camera()
+    valid = torch.ones(pts.shape[1:], dtype=torch.bool)
+    src = SensorDepthEdgeAwareFiniteDifference(stencil_px=1)
+    assert src.requires_sensor_depth
+    n, ok = src(pts, valid, None, cam)
+    n_ref, ok_ref = EdgeAwareDepthFiniteDifference(stencil_px=1)(pts, valid, None, None)
+    assert torch.equal(ok, ok_ref)
+    torch.testing.assert_close(n, n_ref)
