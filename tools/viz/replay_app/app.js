@@ -12,9 +12,11 @@ const FRUSTUM = 0.15, KF_FRUSTUM = 0.08;
 const CEILING_MARGIN = 0.3;   // m above the highest camera (as render_replay.py)
 const FOV = 70;               // horizontal, degrees (as render_replay.py)
 const COL = { est: [0.90, 0.16, 0.16], gt: [0.24, 0.78, 0.24], kf: [0.16, 0.55, 0.90] };
+// Panes of a view, in strip order. The pinned one fills the large area.
+const PANES = ["map", "obs", "render", "albedo", "depth", "mini"];
 
 const S = {
-  renderer: "", runs: [], active: [], frames: [], idx: 0,
+  renderer: "", runs: [], active: [], frames: [], idx: 0, pinned: "map",
   playing: false, speed: 1, mode: "follow", color: "color",
   layers: new Set(["est", "gt", "frustum", "kf"]),
   ceiling: false, ceilingTouched: false, trail: 300, trailTouched: false,
@@ -23,6 +25,7 @@ const S = {
   panel: null, token: 0,
 };
 const D = new Map();          // run index -> {traj: Float32Array, row: Map(frame -> row)}
+const M = new Map();          // run index -> /api/metrics (PSNR / SSIM / LPIPS, computed by the server)
 const pointsCache = new Map(); // "run:snap:color" -> Promise<ArrayBuffer>
 let views = [];               // per active run: DOM + GL handles
 
@@ -252,6 +255,22 @@ function loadTraj(i) {
   }
   return D.get(i).ready;
 }
+// image metrics: the server computes them in the background; poll until done
+let metricsGen = 0;            // bumped when run indices shift (a run removed)
+function loadMetrics(i) {
+  const m = M.get(i);
+  if (m && (m.pending || m.state === "done" || m.state === "error")) return;
+  M.set(i, { psnr: [], ssim: [], lpips: [], missing: {}, ...m, pending: true });
+  const gen = metricsGen;
+  api(`/api/metrics?run=${i}`).then((r) => r.json()).then((data) => {
+    if (gen !== metricsGen) return;      // answer for an index that has shifted
+    M.set(i, data);
+    updatePanel();
+    if (data.state === "running") setTimeout(() => loadMetrics(i), 1500);
+  }).catch((e) => {
+    if (gen === metricsGen) M.set(i, { state: "error", message: e.message, psnr: [], ssim: [], lpips: [], missing: {} });
+  });
+}
 function snapIndex(run, f) {
   let k = 0;
   run.gaussians.forEach((g, j) => { if (g[0] <= f) k = j; });
@@ -331,13 +350,39 @@ function computeFrames() {
   S.idx = j >= 0 ? j : Math.min(S.idx, Math.max(0, S.frames.length - 1));
 }
 const nKf = (run, f) => run.n_keyframes[String(f)] ?? 0;
+// ATE of the live poses (aligned as eval_ate); without config.yml no
+// alignment is known and the unaligned distance is shown instead, labelled so.
+const errSeries = (run) => (run.ate.align ? run.ate.live : run.error);
+const ALIGN_NAME = { se3: "căn SE(3)", sim3: "căn Sim(3)" };
 function errorStats(run, f) {
-  let cur = NaN, sum = 0, n = 0, max = 0;
-  for (const [g, e] of run.error) {
+  let cur = NaN, sq = 0, n = 0, max = 0;
+  for (const [g, e] of errSeries(run)) {
     if (g > f) break;
-    cur = e; sum += e; n++; if (e > max) max = e;
+    cur = e; sq += e * e; n++; if (e > max) max = e;
   }
-  return { cur, mean: n ? sum / n : NaN, max };
+  return { cur, rmse: n ? Math.sqrt(sq / n) : NaN, max };
+}
+function seriesAt(series, f) {
+  for (const [g, v] of series || []) if (g === f) return v;
+  return NaN;
+}
+const seriesMean = (s) => (s && s.length ? s.reduce((a, [, v]) => a + v, 0) / s.length : NaN);
+const LIGHT_TEXT = {
+  none: "MonoGS gốc: không có mô hình đèn",
+  fixed: "tham số đèn cố định (config.yml không có tham số học); giá trị từ light_params.json nếu bản ghi có file này",
+  missing: "config.yml có tham số đèn học được nhưng thiếu light_learned.csv",
+  unknown: "bản ghi chỉ có thư mục record/: thiếu light_learned.csv và config.yml, không biết tham số đèn có học không",
+  learned: "tham số đèn học được (không có spline Φ)",
+};
+function metricsNote(runs) {
+  return runs.map((r, k) => {
+    const m = M.get(S.active[k]);
+    if (!m || m.state === "idle" || (m.state === "running" && !m.total)) return `${r.label}: đang bắt đầu…`;
+    const miss = Object.entries(m.missing || {}).map(([k2, why]) => `${k2.toUpperCase()}: ${why}`);
+    if (m.state === "running") miss.unshift(`đang tính ${m.done}/${m.total}`);
+    if (m.state === "error") miss.unshift(`lỗi: ${m.message}`);
+    return miss.length ? `${r.label}: ${miss.join(" · ")}` : "";
+  }).filter(Boolean).join("<br>");
 }
 const gaussiansAt = (run, f) => (run.gaussians.length ? run.gaussians[snapIndex(run, f)][1] : 0);
 function lightAt(run, f) {
@@ -349,7 +394,7 @@ function lightAt(run, f) {
 // ------------------------------------------------------------------ stage
 
 function tileHTML(kind, cap) {
-  return `<div class="tile" data-t="${kind}"><img data-kind="${kind}" alt=""><div class="cap">${cap}</div></div>`;
+  return `<div class="tile pane" data-pane="${kind}"><img data-kind="${kind}" alt=""><div class="cap">${cap}</div></div>`;
 }
 function buildStage() {
   const stage = $("stage");
@@ -367,31 +412,58 @@ function buildStage() {
     const el = document.createElement("div");
     el.className = "view";
     const albedoTile = run.has_albedo ? tileHTML("albedo", "albedo")
-      : `<div class="tile" data-t="albedo"><div class="empty">không có albedo · MonoGS gốc</div><div class="cap">albedo</div></div>`;
+      : `<div class="tile pane" data-pane="albedo"><div class="empty">không có albedo · MonoGS gốc</div><div class="cap">albedo</div></div>`;
     el.innerHTML = `
       <div class="vhead"><i class="sw" style="background:${runColor(i)}"></i><span class="name">${run.label}</span>
         <span class="sub">${run.run}</span>
         <span class="legend"><span><i style="background:var(--est)"></i>ước lượng</span>
           <span><i style="background:var(--gt)"></i>tham chiếu</span><span><i style="background:var(--kf)"></i>keyframe</span></span></div>
-      <div class="viewport"><img alt=""><canvas></canvas><i class="busy"></i><span class="mode"></span></div>
-      <div class="strip">${tileHTML("obs", "quan sát")}${tileHTML("render", "render")}${albedoTile}${tileHTML("depth", "độ sâu")}
-        <div class="tile mini" data-t="mini"><canvas></canvas><div class="cap">bản đồ 3D</div></div></div>`;
+      <div class="main"></div>
+      <div class="strip"><div class="viewport pane" data-pane="map"><img alt=""><canvas></canvas><i class="busy"></i>
+          <span class="mode"></span><div class="cap">bản đồ 3D</div></div>
+        ${tileHTML("obs", "quan sát")}${tileHTML("render", "render")}${albedoTile}${tileHTML("depth", "độ sâu")}
+        <div class="tile pane mini" data-pane="mini"><canvas></canvas><div class="cap">bản đồ xoay vòng</div></div></div>`;
     stage.appendChild(el);
-    const vp = el.querySelector(".viewport");
+    const panes = Object.fromEntries([...el.querySelectorAll("[data-pane]")].map((p) => [p.dataset.pane, p]));
+    const vp = panes.map;
     const v = { k, i, el, vp, img: vp.querySelector("img"), canvas: vp.querySelector("canvas"),
-      modeLabel: vp.querySelector(".mode"), gl: null, mini: el.querySelector(".tile.mini canvas"), miniGL: null,
-      tiles: [...el.querySelectorAll("img[data-kind]")], crispVersion: -1 };
+      modeLabel: vp.querySelector(".mode"), gl: null, mini: panes.mini.querySelector("canvas"), miniGL: null,
+      tiles: [...el.querySelectorAll("img[data-kind]")], crispVersion: -1,
+      main: el.querySelector(".main"), strip: el.querySelector(".strip"), panes, placed: null };
     views.push(v);
+    loadMetrics(i);
+    // A click on a small pane pins it, in every view at once.
+    Object.values(panes).forEach((p) => p.addEventListener("click", () => {
+      if (p.parentElement !== v.main) pin(p.dataset.pane);
+    }));
     attachMouse(v);
     loadTraj(i);
   });
   layoutStage();
 }
+const paneVisible = (kind) => kind === "map" || (kind === "mini" ? S.mini : S.thumbs);
+// pinned pane into the large area, the others back into the strip in PANES order
+function placePanes(v) {
+  if (v.placed === S.pinned) return;
+  v.main.appendChild(v.panes[S.pinned]);
+  for (const kind of PANES) if (kind !== S.pinned) v.strip.appendChild(v.panes[kind]);
+  for (const kind of PANES) v.panes[kind].title = kind === S.pinned ? "" : "Nhấn để ghim vào khung lớn";
+  v.placed = S.pinned;
+}
+function pin(kind) {
+  if (kind === S.pinned) return;
+  S.pinned = kind;
+  layoutStage();
+  show();
+}
 function layoutStage() {
   const stage = $("stage");
-  document.querySelectorAll(".tile:not(.mini)").forEach((t) => t.classList.toggle("hidden", !S.thumbs));
-  document.querySelectorAll(".tile.mini").forEach((t) => t.classList.toggle("hidden", !S.mini));
-  const n = (S.thumbs ? 4 : 0) + (S.mini ? 1 : 0);
+  if (!paneVisible(S.pinned)) S.pinned = "map";   // its tile was switched off
+  views.forEach((v) => {
+    placePanes(v);
+    for (const kind of PANES) v.panes[kind].classList.toggle("hidden", !paneVisible(kind));
+  });
+  const n = PANES.filter((kind) => kind !== S.pinned && paneVisible(kind)).length;
   stage.style.setProperty("--tiles", Math.max(n, 1));
   document.querySelectorAll(".strip").forEach((s) => s.classList.toggle("hidden", n === 0));
   if (stage.className === "single") {
@@ -593,7 +665,9 @@ function settle() {
 function attachMouse(v) {
   let drag = null;
   v.vp.addEventListener("contextmenu", (e) => e.preventDefault());
+  const pinned = () => v.vp.parentElement === v.main;   // small map: a click pins it, no camera drag
   v.vp.addEventListener("mousedown", (e) => {
+    if (!pinned()) return;
     if (S.mode !== "free") {
       // dragging another view continues from that view with the free camera
       const r = activeRuns()[0];
@@ -633,7 +707,7 @@ function attachMouse(v) {
     S.freeVersion++;
   });
   v.vp.addEventListener("wheel", (e) => {
-    if (S.mode !== "free") return;
+    if (S.mode !== "free" || !pinned()) return;
     e.preventDefault();
     S.free.dist = Math.max(0.2, Math.min(50, S.free.dist * Math.exp(e.deltaY * 0.001)));
     S.interacting = true;
@@ -704,23 +778,38 @@ function openPanel(name) {
   requestAnimationFrame(() => { layoutStage(); show(); });
 }
 function updatePanel() {
-  if (S.panel === "stats") drawStats();
-  if (S.panel === "charts") drawCharts();
+  // A failing panel must not stop playback (show() awaits this).
+  try {
+    if (S.panel === "stats") drawStats();
+    if (S.panel === "charts") drawCharts();
+  } catch (e) {
+    console.error(e);
+    toast(`Ngăn ${PANEL_TITLES[S.panel]} lỗi: ${e.message}`);
+  }
 }
 function drawStats() {
   const f = curFrame();
   document.querySelector('[data-panel="stats"]').innerHTML = activeRuns().map((run, k) => {
     const e = errorStats(run, f);
-    const rmse = Math.sqrt(run.error.reduce((s, [, v]) => s + v * v, 0) / Math.max(run.error.length, 1));
+    const m = M.get(S.active[k]) || {};
+    const a = run.ate;
+    const ateRows = a.align ? `
+        <span class="k">ATE hiện tại (live, ${ALIGN_NAME[a.align]})</span><span class="v big">${fmt(e.cur)} cm</span>
+        <span class="k">ATE RMSE tới đây</span><span class="v">${fmt(e.rmse)} cm</span>
+        <span class="k">ATE lớn nhất tới đây</span><span class="v">${fmt(e.max)} cm</span>
+        <span class="k">ATE RMSE cả chuỗi (live)</span><span class="v">${fmt(a.live_rmse, 2)} cm</span>
+        <span class="k">ATE RMSE keyframe cuối (eval_ate)</span><span class="v big">${fmt(a.keyframe_rmse, 2)} cm</span>` : `
+        <span class="k">Khoảng cách tới tham chiếu (chưa căn chỉnh)</span><span class="v big">${fmt(e.cur)} cm</span>
+        <span class="k">ATE</span><span class="v" title="không có config.yml: không biết Sim(3) hay SE(3)">không tính được</span>`;
     return `<div class="runstats"><div class="rs-head"><i class="sw" style="background:${runColor(S.active[k])}"></i>${run.label}</div>
       <div class="kv">
         <span class="k">Frame</span><span class="v big">${f}</span>
         <span class="k">Keyframe</span><span class="v big">${nKf(run, f)}</span>
         <span class="k">Gaussian trong bản đồ</span><span class="v big">${gaussiansAt(run, f).toLocaleString("vi-VN")}</span>
-        <span class="k">Sai số vị trí hiện tại</span><span class="v big">${fmt(e.cur)} cm</span>
-        <span class="k">Trung bình tới đây</span><span class="v">${fmt(e.mean)} cm</span>
-        <span class="k">Lớn nhất tới đây</span><span class="v">${fmt(e.max)} cm</span>
-        <span class="k">RMSE cả chuỗi (pose live)</span><span class="v">${fmt(rmse)} cm</span>
+        ${ateRows}
+        <span class="k">PSNR / SSIM / LPIPS</span><span class="v big">${fmt(seriesAt(m.psnr, f), 2)} / ${fmt(seriesAt(m.ssim, f), 3)} / ${fmt(seriesAt(m.lpips, f), 3)}</span>
+        <span class="k">Trung bình cả chuỗi</span><span class="v">${fmt(seriesMean(m.psnr), 2)} / ${fmt(seriesMean(m.ssim), 3)} / ${fmt(seriesMean(m.lpips), 3)}</span>
+        <span class="k">Tham số đèn</span><span class="v" title="${LIGHT_TEXT[run.light_status] || ""}">${run.light_status === "learned" ? "học được" : LIGHT_TEXT[run.light_status]}</span>
         <span class="k">Màu bản đồ</span><span class="v">${run.has_albedo ? "albedo" : "đã nung ánh sáng"}</span>
         <span class="k">Ghi ảnh mỗi</span><span class="v">${run.frame_every} frame</span>
         <span class="k">Thư mục</span><span class="v" title="${run.path}">${run.run}</span>
@@ -746,7 +835,7 @@ async function removeRun(i) {
   try {
     await api("/api/remove", { method: "POST", body: JSON.stringify({ index: i }) });
     S.active = S.active.filter((x) => x !== i).map((x) => (x > i ? x - 1 : x));
-    D.clear(); pointsCache.clear();
+    D.clear(); M.clear(); metricsGen++; pointsCache.clear();
     await loadRuns();
     refreshAll();
   } catch (e) { toast(`Không gỡ được: ${e.message}`); }
@@ -826,26 +915,70 @@ function drawCharts() {
   const f = curFrame();
   const colorOf = (k) => runColor(S.active[k]);
   const fmax = Math.max(1, ...runs.map((r) => (r.error.length ? r.error[r.error.length - 1][0] : 0)));
-  chartBoxes.error = lineChart($("chart-error"), runs.map((r, k) => ({ color: colorOf(k), points: r.error })),
+  // ATE: live poses (solid), keyframes at the end of the run (dashed, eval_ate)
+  const ateSeries = [];
+  runs.forEach((r, k) => {
+    ateSeries.push({ color: colorOf(k), points: errSeries(r) });
+    if (r.ate.keyframe.length) ateSeries.push({ color: colorOf(k), points: r.ate.keyframe, dash: [3, 3], width: 1 });
+  });
+  chartBoxes.error = lineChart($("chart-error"), ateSeries,
     { xMin: 0, xMax: fmax, cursor: f, log: S.errLog, yFmt: (v) => (v < 1 ? v.toPrecision(1) : v) });
+  const aligns = [...new Set(runs.map((r) => r.ate.align))];
+  $("ate-title").textContent = aligns.every((a) => a) ? "ATE" : "Sai số vị trí";
+  $("ate-note").textContent = `cm · ${aligns.map((a) => ALIGN_NAME[a] || "chưa căn chỉnh").join(" / ")} · nét đứt: keyframe cuối`;
+  $("ate-legend").innerHTML = runs.filter((r) => !r.ate.align)
+    .map((r) => `${r.label}: không có config.yml cạnh bản ghi nên không biết căn Sim(3) hay SE(3); vẽ khoảng cách chưa căn chỉnh.`)
+    .join("<br>");
+  // image metrics
+  const ms = runs.map((r, k) => M.get(S.active[k]) || {});
+  const allOf = (name) => ms.flatMap((m) => (m[name] || []).map((p) => p[1]));
+  const metricChart = (name, opt) => {
+    chartBoxes[name] = lineChart($(`chart-${name}`), runs.map((r, k) => ({ color: colorOf(k), points: ms[k][name] || [] })),
+      { xMin: 0, xMax: fmax, cursor: f, empty: "chưa có số liệu", ...opt });
+  };
+  const ps = allOf("psnr"), ss = allOf("ssim");
+  metricChart("psnr", { yMin: ps.length ? Math.floor(Math.min(...ps)) - 1 : 0, yMax: ps.length ? Math.ceil(Math.max(...ps)) + 1 : 1 });
+  metricChart("ssim", { yMin: ss.length ? Math.max(0, Math.floor(Math.min(...ss) * 20) / 20) : 0, yMax: 1,
+    yFmt: (v) => v.toFixed(2) });
+  metricChart("lpips", { yFmt: (v) => v.toFixed(2) });
+  $("metrics-note").innerHTML = metricsNote(runs);
   chartBoxes.gauss = lineChart($("chart-gauss"), runs.map((r, k) => ({ color: colorOf(k), points: r.gaussians, step: true })),
     { xMin: 0, xMax: fmax, cursor: f, yFmt: (v) => (v >= 1000 ? `${v / 1000}k` : v) });
-  const series = [], vals = [];
+  // learned emission profile: knot_values[i] at knots_deg[i + 1] (Phi(0) = 1),
+  // knot index when the recording has no config.yml
+  const series = [], vals = [], notes = [];
+  let xMax = 1, degrees = true;
   runs.forEach((r, k) => {
     const row = lightAt(r, f);
-    if (!row) return;
+    if (!row && r.light_fixed) {
+      // fixed light (D100): the values the run used, from config.yml + light_params.json
+      const fx = r.light_fixed;
+      if (fx.phi) {
+        xMax = Math.max(xMax, fx.phi_deg[fx.phi_deg.length - 1]);
+        series.push({ color: colorOf(k), points: fx.phi.map((v, i) => [fx.phi_deg[i], v]), width: 1.8 });
+      }
+      if (runs.length > 1) vals.push(`<span class="k" style="color:${colorOf(k)}">${r.label}</span><span class="v"></span>`);
+      for (const [key, v] of Object.entries(fx.scalars)) vals.push(`<span class="k">${key}</span><span class="v">${v.toPrecision(4)}</span>`);
+      notes.push(`${r.label}: ${LIGHT_TEXT.fixed}`);
+      return;
+    }
+    if (!row) { notes.push(`${r.label}: ${LIGHT_TEXT[r.light_status]}`); return; }
     if (row.phi) {
-      const pts = (phi) => phi.map((v, i) => [i, v]);
+      const xs = r.knots_deg || row.phi.map((_, i) => i);
+      if (!r.knots_deg) degrees = false;
+      xMax = Math.max(xMax, xs[xs.length - 1]);
+      const pts = (phi) => phi.map((v, i) => [xs[i], v]);
       series.push({ color: colorOf(k), points: pts(r.light[0].phi), dash: [3, 3], width: 1 });
       series.push({ color: colorOf(k), points: pts(row.phi), width: 1.8 });
-    }
+    } else notes.push(`${r.label}: ${LIGHT_TEXT.learned}`);
+    if (runs.length > 1) vals.push(`<span class="k" style="color:${colorOf(k)}">${r.label}</span><span class="v"></span>`);
     for (const [key, v] of Object.entries(row.scalars)) {
       if (!key.endsWith("n_at_bound")) vals.push(`<span class="k">${key}</span><span class="v">${v.toPrecision(4)}</span>`);
     }
   });
-  chartBoxes.phi = lineChart($("chart-phi"), series, { xMin: 0, xMax: 50, yMin: 0, yMax: 1.05,
-    xFmt: (v) => `${v}°`, empty: "tham số đèn cố định / không có mô hình đèn" });
-  $("lightvals").innerHTML = vals.join("");
+  chartBoxes.phi = lineChart($("chart-phi"), series, { xMin: 0, xMax, yMin: 0, yMax: 1.05,
+    xFmt: (v) => (degrees ? `${v}°` : `#${v}`), empty: "không có giản đồ Φ" });
+  $("lightvals").innerHTML = vals.join("") + notes.map((n) => `<span class="k" style="grid-column:1/-1">${n}</span>`).join("");
 }
 function chartClick(name) {
   const canvas = $(`chart-${name}`);
@@ -941,8 +1074,7 @@ function wire() {
   $("exportbtn").onclick = openExport;
   $("excancel").onclick = () => $("modal").classList.add("hidden");
   $("exgo").onclick = startExport;
-  chartClick("error");
-  chartClick("gauss");
+  ["error", "psnr", "ssim", "lpips", "gauss"].forEach(chartClick);
   wireTimeline();
   window.addEventListener("keydown", (e) => {
     if (["INPUT", "SELECT"].includes(e.target.tagName)) return;

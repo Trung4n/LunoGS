@@ -34,6 +34,8 @@ Light:
     # Rasterized depth trusted (divided by opacity, D5) above this; lower
     # pixels are shaded at the median trusted depth (D21). D45.
     opacity_thr: 0.5
+  # Learning rate of the albedo (D97): absolute = opt_params.feature_lr.
+  albedo_lr: {mode: absolute}
   init_albedo:
     # De-shade each pixel at its MEASURED sensor depth (D47).
     strategy: placement_depth

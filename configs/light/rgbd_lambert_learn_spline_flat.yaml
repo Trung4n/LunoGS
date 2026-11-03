@@ -13,7 +13,7 @@ inherit_from: "configs/light/rgbd_nocos_learn_spline_flat.yaml"
 Light:
   cosine:
     type: lambert
-    normal_source: {type: sensor_depth_fd, stencil_px: 1}
+    normal_source: {type: sensor_depth_fd, stencil_px: 1, trusted_pixels_only: true}
     warmup_keyframes: 0
 
 LightTracking:

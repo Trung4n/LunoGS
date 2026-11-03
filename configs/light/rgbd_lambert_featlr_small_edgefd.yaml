@@ -6,4 +6,4 @@ inherit_from: "configs/light/rgbd_lambert_featlr_small.yaml"
 
 Light:
   cosine:
-    normal_source: {type: sensor_depth_fd_edge, stencil_px: 1}
+    normal_source: {type: sensor_depth_fd_edge, stencil_px: 1, trusted_pixels_only: true}

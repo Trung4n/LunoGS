@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.request
 
+import numpy as np
 import pytest
 
 pytest.importorskip("torch")
@@ -28,6 +29,27 @@ def _load(name, path):
 
 ra = _load("replay_app", os.path.join(REPO, "tools", "viz", "replay_app.py"))
 rec = _load("test_run_recorder_helpers", os.path.join(REPO, "tests", "test_run_recorder.py"))
+ra.load_heavy()
+rr, rm = ra.rr, ra.rm
+
+# config.yml of the fake light run: RGB-D, a learnable 3-knot spline
+LIGHT_CONFIG = """\
+Dataset:
+  sensor_type: depth
+Light:
+  angular:
+    type: spline
+    knots_deg: [0, 10, 20]
+    learn: {learnable: true, lr: 0.01, prior_weight: 0.0}
+"""
+
+
+def _with_light_files(run_dir):
+    (run_dir / "config.yml").write_text(LIGHT_CONFIG, encoding="utf-8")
+    (run_dir / "light_learned.csv").write_text(
+        "frame_idx,n_keyframes,angular.knot_values[0],angular.knot_values[1],ambient.c\n"
+        "0,1,1,1,0.01\n12,7,0.9,0.4,0.02\n", encoding="utf-8")
+    return run_dir
 
 
 # ---- paths and launcher ---------------------------------------------------------
@@ -73,7 +95,7 @@ def test_render_query_is_validated():
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("app")
-    light = rec._record(tmp / "a", with_albedo=True)
+    light = _with_light_files(rec._record(tmp / "a", with_albedo=True))
     base = rec._record(tmp / "b", with_albedo=False)
     state = ra.AppState("points")
     state.load(str(light), "light")
@@ -102,12 +124,92 @@ def test_page_and_run_summary(server):
     status, headers, body = _get(url + "/")
     assert status == 200 and b"SLAM Replay" in body
     assert _get(url + "/app.js")[0] == 200 and _get(url + "/app.css")[0] == 200
+    # the page is the one read at the server's start, matching its API (not
+    # a newer app.js edited on disk meanwhile)
+    assert _get(url + "/app.js")[2] == server[1].static["app.js"]
     runs = json.loads(_get(url + "/api/runs")[2])
     assert runs["renderer"] == "points"
     r = runs["runs"][0]
     assert r["label"] == "light" and r["frames"] == [5, 10, 15, 20] and r["has_albedo"]
     assert len(r["error"]) == 21 and r["error"][10][1] == pytest.approx(2.0, abs=0.01)  # 2 cm of y offset
     assert [g[1] for g in r["gaussians"]] == [100, 118, 200]  # kf 1, kf 10, final
+    assert r["light_status"] == "learned" and r["knots_deg"] == [0, 10, 20]
+    assert r["light"][-1]["phi"] == [1.0, 0.9, 0.4] and r["light"][-1]["scalars"] == {"ambient.c": 0.02}
+    # RGB-D: SE(3). Fake est x = 0.01 i, gt = (0.01 i, 0.002 i): a rotation
+    # cannot stretch the est line onto the longer gt line, so a small residual.
+    ate = r["ate"]
+    assert ate["align"] == "se3" and len(ate["live"]) == 21 and len(ate["keyframe"]) == 11
+    assert 0 < ate["live_rmse"] < 1.0 and ate["keyframe_rmse"] is not None
+
+
+# ---- ATE, light status, image metrics ----------------------------------------------
+
+
+def _poses(points):
+    out = {}
+    for i, p in enumerate(points):
+        m = np.eye(4)
+        m[:3, 3] = p
+        out[i] = m
+    return out
+
+
+def test_ate_undoes_a_rigid_motion_and_scale_only_for_monocular():
+    rng = np.random.default_rng(0)
+    gt = rng.normal(size=(40, 3))
+    c, s = np.cos(0.7), np.sin(0.7)
+    R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    frames = list(range(40))
+    rigid = gt @ R.T + [1.0, -2.0, 0.5]
+    e = rm.aligned_errors(frames, _poses(rigid), _poses(gt), with_scale=False)
+    np.testing.assert_allclose(e, 0, atol=1e-9)
+    scaled = 2.0 * rigid
+    assert rm.aligned_errors(frames, _poses(scaled), _poses(gt), with_scale=False).max() > 0.1
+    np.testing.assert_allclose(rm.aligned_errors(frames, _poses(scaled), _poses(gt), with_scale=True), 0, atol=1e-9)
+    assert rm.aligned_errors(frames[:2], _poses(gt), _poses(gt), with_scale=False) is None
+    assert rm.alignment({"Dataset": {"sensor_type": "monocular"}}) == "sim3"
+    assert rm.alignment({"Dataset": {"sensor_type": "depth"}}) == "se3"
+    assert rm.alignment(None) is None
+
+
+def test_light_status_says_why_there_is_no_learned_light(tmp_path):
+    light = {"map_color": "linear_albedo"}
+    fixed = {"Light": {"intensity": {"source": "value", "value": 1.0, "learnable": False}}}
+    learn = {"Light": {"pose": {"R_CL": {"learnable": True}}}}
+    assert rr.light_status({"map_color": "srgb"}, None, None) == "none"
+    assert rr.light_status(light, fixed, [{"frame_idx": "0"}]) == "learned"
+    assert rr.light_status(light, fixed, None) == "fixed"
+    assert rr.light_status(light, learn, None) == "missing"
+    assert rr.light_status(light, None, None) == "unknown"  # record/ downloaded alone
+    assert rr.spline_knots_deg({"Light": {"angular": {"knots_deg": [0, 5]}}}) == [0, 5]
+    assert rr.spline_knots_deg({"Light": {"angular": {"type": "blender_spot"}}}) is None
+    # a record/ folder without its run folder: no config, no CSV
+    run = rr.Run(str(rec._record(tmp_path) / "record"))
+    assert (run.light_status, run.config, run.knots_deg) == ("unknown", None, None)
+    assert rm.ate_summary(run)["align"] is None
+
+
+def test_image_metrics_of_the_recorded_images(server):
+    url, _, _, _ = server
+    for _ in range(600):
+        m = json.loads(_get(f"{url}/api/metrics?run=0")[2])
+        if m["state"] not in ("idle", "running"):
+            break
+        time.sleep(0.1)
+    assert m["state"] == "done", m
+    assert m["total"] == 4 and [p[0] for p in m["psnr"]] == [5, 10, 15, 20]
+    # independent random images (smoothed by the recorder's resize): far apart
+    assert all(0 < p[1] < 25 for p in m["psnr"]) and all(-0.2 < p[1] < 0.6 for p in m["ssim"])
+    if "lpips" in m["missing"]:  # no torchmetrics, or fake images too small for AlexNet
+        assert m["lpips"] == []
+    else:
+        assert len(m["lpips"]) == 4 and all(p[1] > 0 for p in m["lpips"])
+    from PIL import Image
+
+    rec_dir = server[2] / "record" / "images"
+    obs, ren = (np.asarray(Image.open(rec_dir / f"000010_{k}.png").convert("RGB"), np.float64) / 255 for k in ("obs", "render"))
+    assert m["psnr"][1][1] == pytest.approx(rm.psnr(ren, obs), abs=1e-4)
+    assert rm.psnr(obs, obs) == float("inf")
 
 
 @pytest.mark.parametrize("mode, extra", [

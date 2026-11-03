@@ -257,6 +257,7 @@ def test_pack_records_zips_each_run(tmp_path):
     run = _record(tmp_path / "results")  # results/rgbd_nocos__office0_lit/2026-10-28/record
     (run / "config.yml").write_text("x: 1")
     (run / "timing.csv").write_text("kind,index,ms,iters\n")
+    (run / "light_params.json").write_text("{}")
     pr.main(["--results", str(tmp_path / "results"), "--out", str(tmp_path / "zips")])
     path = tmp_path / "zips" / "rgbd_nocos__office0_lit__2026-10-28.zip"
     with zipfile.ZipFile(path) as z:
@@ -265,6 +266,34 @@ def test_pack_records_zips_each_run(tmp_path):
     root = "rgbd_nocos__office0_lit__2026-10-28/"
     assert root + "config.yml" in names and root + "record/meta.json" in names
     assert root + "timing.csv" in names and root + "light_learned.csv" not in names
+    assert root + "light_params.json" in names  # the fixed light values (D100)
     assert any(n.startswith(root + "record/maps/") for n in names)
     # unzipped, the folder is directly a --run of the replay tool
     assert _replay().Run(str(tmp_path / "unzipped" / root)).image_frames == [5, 10, 15, 20]
+
+
+def test_fixed_light_values_for_display(monkeypatch):
+    # D100: a run whose light is fixed shows the values it used, resolved from
+    # config.yml + light_params.json as SLAM resolves them.
+    pytest.importorskip("torch")
+    from utils.config_utils import load_config
+
+    params = {
+        "intensity": {"K_estimated_step3": 30.0},
+        "t_CL_m": {"estimated_opencv": [0.0, -0.05, 0.0]},
+        "R_CL": {"estimated": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+        "cone": {"half_angle_deg_estimated": 30.0, "blend_estimated": 0.35},
+        "ambient": {"c_estimated": 0.12},
+    }
+    monkeypatch.chdir(REPO)
+    cfg = load_config("configs/light/rgbd_lambert.yaml")
+    out = _replay().fixed_light(cfg, params)
+    sc = out["scalars"]
+    assert sc["intensity"] == pytest.approx(30.0)
+    assert sc["angular.half_angle_deg"] == pytest.approx(30.0)
+    assert sc["ambient.c"] == pytest.approx(0.12)
+    assert sc["pose.t_CL[1]"] == pytest.approx(-0.05)
+    assert sc["pose.R_CL tilt (deg)"] == pytest.approx(0.0)
+    phi, deg = np.asarray(out["phi"]), np.asarray(out["phi_deg"])
+    assert phi[0] == pytest.approx(1.0) and phi[-1] == 0.0
+    assert (phi[deg > 30.0] == 0).all() and deg[-1] > 30.0  # blender_spot: zero outside the cone

@@ -11,7 +11,7 @@ Light:
     type: lambert
     # stencil_px 1: on clean depth, 1-pixel differences matched ground truth
     # (1-3% of the pixels with n . l < 0.3, D46).
-    normal_source: {type: sensor_depth_fd, stencil_px: 1}
+    normal_source: {type: sensor_depth_fd, stencil_px: 1, trusted_pixels_only: true}
     # No warm-up: the warm-up (D43) is for monocular, whose first keyframes
     # are at guessed depths.
     warmup_keyframes: 0

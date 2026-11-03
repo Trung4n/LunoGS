@@ -133,7 +133,7 @@ class GBufferNormals:
         return gbuffer["normal"], gbuffer["normal_valid"] & valid
 
 
-@register("normals", "sensor_depth_fd", options=("stencil_px",))
+@register("normals", "sensor_depth_fd", options=("stencil_px", "trusted_pixels_only"))
 class SensorDepthFiniteDifference:
     """depth_fd applied to the OBSERVED frame's sensor depth (camera.depth,
     RGB-D only), not to the rasterized depth (docs/DECISIONS.md D49).
@@ -153,13 +153,27 @@ class SensorDepthFiniteDifference:
     data's pixel convention (offset 0) while the rasterized maps sit half a
     pixel off (D29); the normal at pixel i is used with the light direction
     of rasterized pixel i, half a pixel apart, which is negligible for a
-    direction. Pixels without a sensor reading (depth 0) have no normal; the
-    result is also restricted to the pixels the G-buffer trusts (`valid`)."""
+    direction. Pixels without a sensor reading (depth 0) have no normal.
+
+    trusted_pixels_only (docs/DECISIONS.md D99): true = the normals are also
+    restricted to the pixels the G-buffer trusts (`valid`: rasterized
+    opacity >= Light.gbuffer.opacity_thr), the behaviour before D99. Then a
+    low-opacity hole of the map gets no normal, Lambert gives it n . l = 0
+    and it renders ambient-only (black spots), and LightTracking.pixel_weight
+    drops it from both losses. false = the normal depends on the sensor
+    depth only; the distance and direction to the lamp of such a pixel still
+    come from the G-buffer's fallback depth (D21)."""
 
     requires_sensor_depth = True
     fd_class = DepthFiniteDifference
 
-    def __init__(self, stencil_px):
+    def __init__(self, stencil_px, trusted_pixels_only):
+        if not isinstance(trusted_pixels_only, bool):
+            raise ValueError(
+                "Light.cosine.normal_source.trusted_pixels_only must be true or false, "
+                f"got {trusted_pixels_only!r}"
+            )
+        self.trusted_pixels_only = trusted_pixels_only
         self.fd = self.fd_class(stencil_px)
         # Runtime cache, not configuration: normals of the last camera seen
         # (tracking renders the same frame for every iteration). One entry
@@ -199,10 +213,10 @@ class SensorDepthFiniteDifference:
             self._cache = self.fd(rays * z[None], z > 0, gbuffer, camera)
             self._cache_key = (camera, depth, points.device, points.dtype)
         n, ok = self._cache
-        return n, ok & valid
+        return n, (ok & valid) if self.trusted_pixels_only else ok
 
 
-@register("normals", "sensor_depth_fd_edge", options=("stencil_px",))
+@register("normals", "sensor_depth_fd_edge", options=("stencil_px", "trusted_pixels_only"))
 class SensorDepthEdgeAwareFiniteDifference(SensorDepthFiniteDifference):
     """sensor_depth_fd with the edge-aware one-sided differences of
     depth_fd_edge (docs/DECISIONS.md D94). RGB-D only."""

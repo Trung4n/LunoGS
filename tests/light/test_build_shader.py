@@ -217,6 +217,10 @@ def test_light_config_set():
         "rgbd_lambert_selfcal_featlr_large.yaml",
         "rgbd_nocos_featlr_small.yaml",
         "rgbd_lambert_featlr_small_edgefd.yaml",
+        "rgbd_lambert_edgefd_albedolr_rel.yaml",
+        "rgbd_lambert_edgefd_albedolr_rel_x2.yaml",
+        "rgbd_lambert_edgefd_albedolr_rel_x4.yaml",
+        "rgbd_lambert_edgefd_untrusted.yaml",
         "rgbd_nocos_depth_noise.yaml",
         "rgbd_nocos_depth_noise_heavy.yaml",
         "verify_shading.yaml",
@@ -292,7 +296,7 @@ def test_lambert_differs_from_the_main_model_only_by_the_cosine(monkeypatch):
     nocos = load_config("configs/light/rgbd_nocos.yaml")
     assert lam["Light"]["cosine"] == {
         "type": "lambert", "warmup_keyframes": 0,
-        "normal_source": {"type": "sensor_depth_fd", "stencil_px": 1},
+        "normal_source": {"type": "sensor_depth_fd", "stencil_px": 1, "trusted_pixels_only": True},
     }
     pw = read_light_tracking(lam).pixel_weight
     assert (pw.enabled, pw.apply_to, pw.min_cos_nl) == (True, ("tracking", "mapping"), 0.3)
@@ -356,6 +360,8 @@ def test_sensor_and_map_normals_agree_on_a_smooth_map(monkeypatch):
     for source in ("sensor_depth_fd", "depth_fd"):
         cfg = load_config("configs/light/rgbd_lambert.yaml")
         cfg["Light"]["cosine"]["normal_source"] = {"type": source, "stencil_px": 1}
+        if source == "sensor_depth_fd":
+            cfg["Light"]["cosine"]["normal_source"]["trusted_pixels_only"] = True
         out[source] = build_shader(cfg, _FAKE_PARAMS)(g, cam)
     a, b = out["sensor_depth_fd"], out["depth_fd"]
     assert torch.equal(a["light_normal_valid"], b["light_normal_valid"])

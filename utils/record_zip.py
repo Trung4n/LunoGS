@@ -17,6 +17,9 @@ import zipfile
 RECORD_DIR = "record"
 EXTRA_FILES = (
     "config.yml",
+    # the per-scene params file config.yml's JSON keys resolve to (slam.py
+    # copies it next to config.yml): the fixed light values (D100)
+    "light_params.json",
     "light_learned.csv",
     "timing.csv",
     "albedo_stats.csv",

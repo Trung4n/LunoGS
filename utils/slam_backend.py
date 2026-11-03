@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.scene.gaussian_model import GaussianModel
+from light_models import read_albedo_lr
 from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
@@ -89,6 +90,9 @@ class BackEnd(mp.Process):
     def set_hyperparams(self):
         # Not used anywhere in the backend.
         self.save_results = self.config["Results"]["save_results"]
+        # Light.albedo_lr (D97), read here so a bad block fails before the
+        # run starts. None for original MonoGS (feature_lr as configured).
+        self.albedo_lr = read_albedo_lr(self.config) if self.shader is not None else None
 
         # --- initial map (initialize_map), single frame ---
         # number of iterations
@@ -185,6 +189,24 @@ class BackEnd(mp.Process):
             )
             self.log_albedo(frame_idx, "new", new)
         log_exposure(self.config["Results"]["save_dir"], frame_idx, "new", viewpoint)
+
+    def set_albedo_lr(self, frame_idx):
+        # Light.albedo_lr: relative_to_initial_albedo sets the albedo learning
+        # rate to relative_lr * the mean albedo of the map just created
+        # (docs/DECISIONS.md D97), once per map initialization. f_rest keeps
+        # MonoGS's ratio to f_dc (training_setup).
+        if self.albedo_lr is None or self.albedo_lr.mode == "absolute":
+            return
+        with torch.no_grad():
+            scale = float(self.gaussians.get_albedo.mean())
+        lr = self.albedo_lr.relative_lr * scale
+        for group in self.gaussians.optimizer.param_groups:
+            if group["name"] == "f_dc":
+                group["lr"] = lr
+            elif group["name"] == "f_rest":
+                group["lr"] = lr / 20.0
+        Log(f"albedo learning rate {lr:.3g} = {self.albedo_lr.relative_lr:.3g} x initial mean albedo "
+            f"{scale:.4f} (frame {frame_idx})", tag="Light")
 
     def start_light_learning(self):
         # Learnable light parameters (light_models/learning.py, D60): this
@@ -706,6 +728,7 @@ class BackEnd(mp.Process):
                     self.add_next_kf(
                         cur_frame_idx, viewpoint, depth_map=depth_map, init=True
                     )
+                    self.set_albedo_lr(cur_frame_idx)
                     self.initialize_map(cur_frame_idx, viewpoint)
                     if self.shader is not None:
                         self.log_albedo(cur_frame_idx, "map")

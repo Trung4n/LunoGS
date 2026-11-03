@@ -1,0 +1,11 @@
+# rgbd_lambert_featlr_small_edgefd.yaml with sensor normals in EVERY pixel
+# that has a sensor reading, also where the map's opacity is below
+# Light.gbuffer.opacity_thr (docs/DECISIONS.md D99). Before, such holes got
+# no normal, rendered ambient-only (black spots, 22.7% of the squared error
+# of the final map on 0.08% of the pixels) and were dropped from both losses
+# by the pixel weight, so no photometric gradient refilled them.
+inherit_from: "configs/light/rgbd_lambert_featlr_small_edgefd.yaml"
+
+Light:
+  cosine:
+    normal_source: {type: sensor_depth_fd_edge, stencil_px: 1, trusted_pixels_only: false}

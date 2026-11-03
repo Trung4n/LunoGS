@@ -93,6 +93,8 @@ label.row:has(input[type=range]) { flex-wrap: wrap; }
 .clabel { color: var(--text); margin-bottom: 4px; }
 .clabel span { color: var(--dim); margin-left: 6px; font-size: 11px; }
 .chart canvas { width: 100%; height: 150px; display: block; cursor: crosshair; }
+.chart canvas.short { height: 105px; }
+.chart .note:empty { display: none; }
 #lightvals { margin-top: 6px; font-size: 11.5px; }
 
 /* records */
@@ -115,6 +117,8 @@ label.row:has(input[type=range]) { flex-wrap: wrap; }
 .vhead .sub { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
 .vhead .legend { margin-left: auto; color: var(--dim); display: flex; gap: 12px; }
 .vhead .legend i { display: inline-block; width: 12px; height: 2px; margin-right: 5px; vertical-align: 3px; }
+.main { position: relative; min-height: 0; min-width: 0; }
+.main > .pane { position: absolute; inset: 0; }
 .viewport { position: relative; min-height: 0; min-width: 0; background: #000; border: 1px solid var(--hair);
   overflow: hidden; }
 .viewport > img, .viewport > canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
@@ -133,10 +137,14 @@ label.row:has(input[type=range]) { flex-wrap: wrap; }
 .single .strip { grid-template-rows: repeat(var(--tiles, 5), minmax(0, 1fr)); }
 .compare .strip { grid-template-columns: repeat(var(--tiles, 5), minmax(0, 1fr)); }
 .tile { position: relative; background: #000; border: 1px solid var(--hair); min-height: 0; overflow: hidden; }
-.compare .tile { aspect-ratio: 16 / 9; }
+.compare .strip > .pane { aspect-ratio: 16 / 9; }
 .tile img, .tile canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
-.tile .cap { position: absolute; left: 0; bottom: 0; padding: 1px 6px; font-size: 10.5px; color: #a1a1aa;
+.pane .cap { position: absolute; left: 0; bottom: 0; padding: 1px 6px; font-size: 10.5px; color: #a1a1aa;
   background: rgba(0, 0, 0, .55); }
+/* small panes: a click pins them; the map shows its caption instead of the mode */
+.strip > .pane, .strip > .viewport.free { cursor: pointer; }
+.strip > .pane:hover { border-color: #4a4a52; }
+.main > .viewport > .cap, .strip > .viewport > .mode, .strip > .viewport > .busy { display: none; }
 .tile .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: #4a4a52; font-size: 11px; }
 .hidden { display: none !important; }

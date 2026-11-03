@@ -79,9 +79,9 @@ class Run:
         self.n_keyframes = {int(r["frame_idx"]): int(r["n_keyframes"]) for r in rows}
         self.image_frames = sorted(int(r["frame_idx"]) for r in rows if r["has_images"] == "1")
         final = os.path.join(self.dir, "frames_final.csv")
-        self.keyframes = []
+        self.keyframes, self.est_final = [], {}
         if os.path.isfile(final):
-            frows, _ = _read_poses(final, "est")
+            frows, self.est_final = _read_poses(final, "est")
             self.keyframes = [int(r["frame_idx"]) for r in frows if r["is_keyframe"] == "1"]
         self.maps = []  # (frame_idx, path), the final map last
         for path in sorted(glob.glob(os.path.join(self.dir, "maps", "kf*.npz"))):
@@ -92,7 +92,23 @@ class Run:
             with np.load(final_map) as z:
                 self.maps.append((int(z["frame_idx"]), final_map))
         self.maps.sort(key=lambda m: m[0])
-        self.light = _read_light(os.path.join(os.path.dirname(os.path.normpath(self.dir)), "light_learned.csv"))             or _read_light(os.path.join(self.dir, "light_learned.csv"))
+        # Per-run files sit in the run folder (the parent of record/), or next
+        # to meta.json when only record/ was downloaded.
+        run_dir = os.path.dirname(os.path.normpath(self.dir))
+        self.light = _read_light(os.path.join(run_dir, "light_learned.csv")) \
+            or _read_light(os.path.join(self.dir, "light_learned.csv"))
+        self.config = _read_config(os.path.join(run_dir, "config.yml")) \
+            or _read_config(os.path.join(self.dir, "config.yml"))
+        self.light_status = light_status(self.meta, self.config, self.light)
+        # Fixed light values (D100): resolved from config.yml and the run's
+        # copy of light_params.json; None if not fixed or a file is missing.
+        self.light_fixed = None
+        if self.light_status == "fixed":
+            params = _read_json(os.path.join(run_dir, "light_params.json")) \
+                or _read_json(os.path.join(self.dir, "light_params.json"))
+            if params is not None:
+                self.light_fixed = fixed_light(self.config, params)
+        self.knots_deg = spline_knots_deg(self.config)
         self._map_cache = (None, None)
         self.color_gain = self._color_gain()
 
@@ -141,6 +157,114 @@ def _read_light(path):
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     return rows or None
+
+
+def _read_config(path):
+    """The run's config.yml (as slam.py saved it) or None."""
+    if not os.path.isfile(path):
+        return None
+    import yaml
+
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _read_json(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# Display grid of the fixed emission profile (degrees): not a light-model
+# value, only where Phi is sampled for the plot.
+PHI_GRID_DEG = np.arange(0.0, 90.0, 0.5)
+
+
+def fixed_light(config, params):
+    """The light values a run used when nothing was learned (D100), for
+    display: {"scalars": {config path: value}, "phi_deg": [...], "phi": [...]}.
+    Every ParamSpec of the Light block resolved as SLAM resolves it (perturb
+    included); a 3x3 matrix (R_CL) is shown as the tilt of the light axis
+    from the optical axis. Phi is the run's angular component, sampled on
+    PHI_GRID_DEG up to a few samples past where it vanishes (built alone:
+    older recordings lack keys of other components added since, e.g. D99)."""
+    import torch
+
+    import light_models.angular  # noqa: F401 - registers the angular forms
+    from light_models.params import resolve_param
+    from light_models.registry import build_component
+
+    scalars = {}
+
+    def walk(block, path):
+        if isinstance(block, dict):
+            if "source" in block:
+                v = np.asarray(resolve_param(block, path, params).value, np.float64)
+                if v.ndim == 0:
+                    scalars[path] = float(v)
+                elif v.shape == (3, 3):
+                    scalars[path + " tilt (deg)"] = float(np.degrees(np.arccos(np.clip(v[2, 2], -1.0, 1.0))))
+                elif v.ndim == 1:
+                    scalars.update({f"{path}[{i}]": float(x) for i, x in enumerate(v)})
+                return
+            for k, sub in block.items():
+                walk(sub, f"{path}.{k}" if path else k)
+
+    walk(config["Light"], "")
+    out = {"scalars": scalars, "phi_deg": None, "phi": None}
+    # Only the angular component is built: the rest of the shader is not
+    # needed here, and older recordings lack keys added since (e.g. D99).
+    block = config["Light"].get("angular")
+    if block is not None:
+        angular = build_component("angular", block, "Light.angular", params)
+        with torch.no_grad():
+            phi = angular(torch.tensor(np.cos(np.radians(PHI_GRID_DEG)), dtype=torch.float64)).numpy()
+        on = np.nonzero(phi > 0)[0]
+        last = min(len(phi), (on[-1] + 1 if len(on) else 1) + 6)
+        out["phi_deg"] = PHI_GRID_DEG[:last].tolist()
+        out["phi"] = phi[:last].tolist()
+    return out
+
+
+def _has_learnable(block):
+    if isinstance(block, dict):
+        return block.get("learnable") is True or any(_has_learnable(v) for v in block.values())
+    if isinstance(block, list):
+        return any(_has_learnable(v) for v in block)
+    return False
+
+
+# Display text of light_status() on the video (OpenCV text: ASCII only).
+LIGHT_STATUS_TEXT = {
+    "none": "no light model (original MonoGS)",
+    "fixed": "light parameters: fixed",
+    "missing": "learnable light, but no light_learned.csv",
+    "unknown": "no light_learned.csv / config.yml next to record/",
+}
+
+
+def light_status(meta, config, rows):
+    """What the recording says about the light parameters:
+      none     original MonoGS (no light model);
+      learned  light_learned.csv has rows;
+      fixed    config.yml found, nothing in its Light block is learnable;
+      missing  config.yml has learnable light parameters, but no CSV;
+      unknown  neither file (a record/ folder downloaded on its own)."""
+    if meta["map_color"] != "linear_albedo":
+        return "none"
+    if rows:
+        return "learned"
+    if config is None:
+        return "unknown"
+    return "missing" if _has_learnable(config.get("Light")) else "fixed"
+
+
+def spline_knots_deg(config):
+    """Light.angular.knots_deg of a spline profile in config.yml, or None
+    (no config, or another angular form)."""
+    angular = ((config or {}).get("Light") or {}).get("angular") or {}
+    return angular.get("knots_deg")
 
 
 def linear_to_srgb(x):
@@ -420,7 +544,7 @@ def light_panel(run, n_kf, size):
     img = np.empty((h, w, 3), np.uint8)
     img[:] = COL_PANEL_BG
     if run.light is None:
-        put_text(img, ["light parameters: fixed / none"])
+        put_text(img, [LIGHT_STATUS_TEXT[run.light_status]])
         return img
     row = run.light[0]
     for r in run.light:
@@ -433,15 +557,17 @@ def light_panel(run, n_kf, size):
         if k not in ("frame_idx", "n_keyframes") and not k.startswith("angular.knot_values["):
             lines.append(f"{k} {float(v):.4g}")
     if knots:
-        # knot i is at (i + 1) degrees (Phi(0) = 1 fixed), see angular.Spline.
-        xs = [0.0] + [i + 1.0 for i, _ in knots]
+        # knot_values[i] is Phi at knots_deg[i + 1] (Phi(0) = 1 fixed), see
+        # angular.Spline; without config.yml the x axis is the knot index.
+        xs = [float(x) for x in run.knots_deg] if run.knots_deg else [0.0] + [i + 1.0 for i, _ in knots]
+        unit = "deg" if run.knots_deg else "knot"
         ys = [1.0] + [v for _, v in knots]
         x0, y0, x1, y1 = 40, 50, w - 10, h - 25
         cv2.rectangle(img, (x0, y0), (x1, y1), (90, 90, 90), 1)
         pts = [(int(x0 + (x1 - x0) * x / xs[-1]), int(y1 - (y1 - y0) * y)) for x, y in zip(xs, ys)]
         cv2.polylines(img, [np.array(pts, np.int32)], False, (80, 200, 255), 2, cv2.LINE_AA)
         cv2.putText(img, "Phi", (5, y0 + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COL_TEXT, 1)
-        cv2.putText(img, f"0..{int(xs[-1])} deg", (x0, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COL_TEXT, 1)
+        cv2.putText(img, f"0..{xs[-1]:g} {unit}", (x0, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COL_TEXT, 1)
         put_text(img, lines[:2], org=(8, 18), scale=0.42)
     else:
         put_text(img, lines, scale=0.45)
@@ -707,8 +833,9 @@ def write_notes(path, runs, args, view, renderer, n_frames):
         "  rendered       : ảnh render từ bản đồ tại pose ước lượng (qua mô hình đèn nếu có).",
         "  albedo         : albedo render (chỉ mô hình đèn), chia cho phân vị 99 của từng frame.",
         f"  rendered depth : độ sâu render, thang màu 0-{args.depth_max:g} m (đen = không có).",
-        "  learned light  : giản đồ phát sáng Phi(theta) đang học (spline, 0-50 độ) và các tham số đèn",
-        "                   học được; 'fixed / none' nếu tham số đèn cố định hoặc không có mô hình đèn.",
+        "  learned light  : giản đồ phát sáng Phi(theta) đang học (spline, trục x theo knots_deg của config.yml)",
+        "                   và các tham số đèn học được; nếu không có light_learned.csv thì ghi lý do",
+        "                   (cố định, không có mô hình đèn, hoặc bản ghi thiếu file).",
         f"  3D map (orbit) : bản đồ hiện tại nhìn từ góc thứ ba quay vòng ({args.orbit_period} khung hình một vòng);",
         f"                   màu đỏ / xanh lá như trên; ẩn Gaussian cao hơn camera cao nhất + {args.orbit_ceiling:g} m.",
         "",

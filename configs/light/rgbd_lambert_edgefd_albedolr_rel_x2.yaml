@@ -1,0 +1,13 @@
+# Albedo learning-rate sweep (docs/DECISIONS.md D98): rgbd_lambert_edgefd_albedolr_rel.yaml
+# with relative_lr x2. In the core of the cone the map albedo, not the
+# shading, limits the image (true albedo + SLAM shading: +2.6 dB on office0
+# frames >= 250), and the live PSNR right after tracking fell with the small
+# learning rate (D92): the albedo may be under-fitted. featlr_small's relative
+# step is about 6x below original MonoGS on the even data (D90).
+inherit_from: "configs/light/rgbd_lambert_edgefd_albedolr_rel.yaml"
+
+Light:
+  albedo_lr:
+    _replace: true
+    mode: relative_to_initial_albedo
+    relative_lr: 0.0038

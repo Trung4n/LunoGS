@@ -46,16 +46,17 @@ for p in (REPO, HERE):
 # numpy, OpenCV and render_replay are imported by load_heavy() only when the
 # server starts: the Windows launcher needs nothing beyond the standard
 # library (it runs the server inside WSL).
-np = rr = None
+np = rr = rm = None
 
 
 def load_heavy():
-    global np, rr
+    global np, rr, rm
     if rr is None:
         import numpy
         import render_replay
+        import replay_metrics
 
-        np, rr = numpy, render_replay
+        np, rr, rm = numpy, render_replay, replay_metrics
 
 VIEW_MODES = ("follow", "overview", "orbit", "free")
 COLOR_MODES = ("color", "keyframe", "opacity", "height")
@@ -119,6 +120,8 @@ class AppRun:
         self.extent = max(float(np.linalg.norm(flat, axis=1).max()), 0.5)
         self.top = float((pos @ self.up).max())
         self.err_cm = {i: float(np.linalg.norm(r.est_live[i][:3, 3] - r.gt[i][:3, 3]) * 100) for i in self.all_frames}
+        self.ate = rm.ate_summary(r)
+        self.metrics = rm.ImageMetrics(r)  # started by the first /api/metrics
         follow = rr.FollowCamera(self.up, self.d.back, self.d.height, self.d.ahead, self.d.smoothing)
         self.follow_poses = {i: follow.update(r.est_live[i]) for i in self.all_frames}
         self.overview = rr.overview_pose(pos, self.up, math.radians(self.d.elevation), self.d.distance)
@@ -168,9 +171,14 @@ class AppRun:
             "frames": r.image_frames,
             "keyframes": r.keyframes,
             "n_keyframes": {str(f): r.n_keyframes.get(f, 0) for f in r.image_frames},
+            # unaligned distance, shown only when no alignment is known (no config.yml)
             "error": [[f, round(self.err_cm[f], 3)] for f in self.all_frames],
+            "ate": self.ate,
             "gaussians": self.gaussian_counts(),
             "light": self.light_series(),
+            "light_status": r.light_status,
+            "light_fixed": r.light_fixed,
+            "knots_deg": r.knots_deg,
             "up": self.up.tolist(),
             "centre": self.centre.tolist(),
             "extent": self.extent,
@@ -335,9 +343,25 @@ class AppRun:
 # ---------------------------------------------------------------- state
 
 
+STATIC_FILES = ("index.html", "app.js", "app.css")
+
+
+def load_static():
+    """The page's files as they are when the server starts. Served from
+    memory, so a server keeps serving the page of its own version: a page
+    edited on disk after the start would otherwise call an API the running
+    (older) server does not have, and fail."""
+    out = {}
+    for name in STATIC_FILES:
+        with open(os.path.join(STATIC, name), "rb") as f:
+            out[name] = f.read()
+    return out
+
+
 class AppState:
     def __init__(self, renderer_kind):
         load_heavy()
+        self.static = load_static()
         self.renderer_kind = renderer_kind
         self.runs = []
         self.lock = threading.Lock()  # one renderer call at a time (CUDA)
@@ -488,13 +512,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": msg}, code)
 
     def _static(self, name):
-        path = os.path.join(STATIC, name)
-        if not os.path.isfile(path):
+        if name not in self.state.static:
             return self._error(404, "not found")
         ctype = {".html": "text/html", ".js": "application/javascript", ".css": "text/css"}.get(
             os.path.splitext(name)[1], "application/octet-stream")
-        with open(path, "rb") as f:
-            self._send(200, f.read(), ctype + "; charset=utf-8")
+        self._send(200, self.state.static[name], ctype + "; charset=utf-8")
 
     def do_GET(self):  # noqa: N802 - http.server API
         url = urllib.parse.urlparse(self.path)
@@ -521,6 +543,10 @@ class Handler(BaseHTTPRequestHandler):
                 with st.lock:  # shares the colour cache with the renderer
                     body = run.points_payload(int(q["snap"][0]), color)
                 return self._send(200, body, "application/octet-stream")
+            if url.path == "/api/metrics":
+                run = st.runs[int(q["run"][0])]
+                run.metrics.start()
+                return self._json(run.metrics.payload())
             if url.path == "/api/traj":
                 return self._send(200, st.runs[int(q["run"][0])].traj_payload(), "application/octet-stream")
             if url.path in ("/api/render", "/api/image"):

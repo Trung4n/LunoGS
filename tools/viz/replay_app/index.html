@@ -54,8 +54,14 @@
       <div class="dbody">
         <div class="panel" data-panel="stats"></div>
         <div class="panel" data-panel="charts">
-          <div class="chart"><div class="clabel">Sai số vị trí <span>cm</span>
-            <label class="inline"><input type="checkbox" id="errlog">thang log</label></div><canvas id="chart-error"></canvas></div>
+          <div class="chart"><div class="clabel"><span id="ate-title">ATE</span> <span id="ate-note">cm</span>
+            <label class="inline"><input type="checkbox" id="errlog">thang log</label></div><canvas id="chart-error"></canvas>
+            <p class="note" id="ate-legend"></p></div>
+          <div class="chart"><div class="clabel">PSNR <span>dB · render lúc tracking so với ảnh quan sát</span></div>
+            <canvas id="chart-psnr" class="short"></canvas><p class="note" id="metrics-note"></p></div>
+          <div class="chart"><div class="clabel">SSIM</div><canvas id="chart-ssim" class="short"></canvas></div>
+          <div class="chart"><div class="clabel">LPIPS <span>AlexNet · thấp hơn là tốt hơn</span></div>
+            <canvas id="chart-lpips" class="short"></canvas></div>
           <div class="chart"><div class="clabel">Số Gaussian</div><canvas id="chart-gauss"></canvas></div>
           <div class="chart"><div class="clabel">Giản đồ phát sáng Φ(θ) <span>nét đứt: lúc đầu</span></div><canvas id="chart-phi"></canvas>
             <div id="lightvals" class="kv"></div></div>

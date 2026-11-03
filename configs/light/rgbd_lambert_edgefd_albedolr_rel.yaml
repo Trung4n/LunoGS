@@ -1,0 +1,16 @@
+# rgbd_lambert_featlr_small_edgefd.yaml with the albedo learning rate set
+# RELATIVE to the initial map's mean albedo (docs/DECISIONS.md D95, D97), so
+# that the relative albedo step found on office0 carries over to scenes and
+# light intensities with another albedo scale (room0: about 6x larger).
+#
+# relative_lr 0.0019 = 0.000113 (feature_lr of rgbd_lambert_featlr_small.yaml)
+# / 0.059 (mean albedo of the Gaussians created at initialization, office0,
+# albedo_stats.csv of rgbd_lambert_featlr_small_edgefd 11-02 15:32, stage
+# "new" of frame 0): the same learning rate on office0.
+inherit_from: "configs/light/rgbd_lambert_featlr_small_edgefd.yaml"
+
+Light:
+  albedo_lr:
+    _replace: true
+    mode: relative_to_initial_albedo
+    relative_lr: 0.0019

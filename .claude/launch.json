@@ -1,0 +1,21 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "replay-app-cpu",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tools/viz/replay_app.py", "--cpu", "--no_browser", "--port", "8765",
+        "record/runs/rgbd_lambert_featlr_small_edgefd__office0_lit__2026-11-02-15-32-14",
+        "record/runs/rgbd_nocos__office0_lit__2026-11-01-09-46-48"],
+      "port": 8765
+    },
+    {
+      "name": "replay-app-gpu",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tools/viz/replay_app.py", "--no_browser", "--port", "8770",
+        "record/runs/rgbd_lambert_featlr_small_edgefd__office0_lit__2026-11-02-15-32-14",
+        "record/office0_lit_nocos_selfcal_rgbd"],
+      "port": 8770
+    }
+  ]
+}

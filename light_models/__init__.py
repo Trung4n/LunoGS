@@ -98,6 +98,43 @@ def read_albedo_init(config):
     return SimpleNamespace(strategy=strategy, params=params)
 
 
+# How the learning rate of the albedo (the SH DC coefficient) is set
+# (docs/DECISIONS.md D97):
+#   absolute                  - opt_params.feature_lr, as in MonoGS.
+#   relative_to_initial_albedo - relative_lr * the mean albedo of the
+#                    Gaussians created at map initialization (one value for
+#                    the run). Adam takes an absolute step, so the RELATIVE
+#                    albedo step, which sets how fast colours fit and how much
+#                    the map densifies (D90-D92), depends on the albedo scale,
+#                    i.e. on the light intensity K and the scene (D95). This
+#                    mode keeps the relative step across scenes and K.
+ALBEDO_LR_MODES = ("absolute", "relative_to_initial_albedo")
+
+
+def read_albedo_lr(config):
+    """Light.albedo_lr block: {mode: absolute} or
+    {mode: relative_to_initial_albedo, relative_lr: <number > 0>}.
+    Returns a namespace with `mode` and `relative_lr` (None if absolute)."""
+    light_cfg = require_key(config, "Light", "")
+    block = require_key(light_cfg, "albedo_lr", "Light")
+    if not isinstance(block, dict):
+        raise TypeError(f"Light.albedo_lr must be a block {{mode: ...}}, got {block!r}")
+    mode = require_key(block, "mode", "Light.albedo_lr")
+    if mode not in ALBEDO_LR_MODES:
+        raise ValueError(f"Light.albedo_lr.mode must be one of {ALBEDO_LR_MODES}, got {mode!r}")
+    allowed = {"mode"} | ({"relative_lr"} if mode == "relative_to_initial_albedo" else set())
+    extra = set(block) - allowed
+    if extra:
+        raise ValueError(f"Light.albedo_lr: unexpected keys {sorted(extra)} for mode '{mode}'")
+    rel = None
+    if mode == "relative_to_initial_albedo":
+        rel = require_key(block, "relative_lr", "Light.albedo_lr")
+        if isinstance(rel, bool) or not isinstance(rel, (int, float)) or not rel > 0:
+            raise ValueError(f"Light.albedo_lr.relative_lr must be a number > 0, got {rel!r}")
+        rel = float(rel)
+    return SimpleNamespace(mode=mode, relative_lr=rel)
+
+
 def read_light_tracking(config):
     """LightTracking options used by the tracking AND mapping losses.
 

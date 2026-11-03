@@ -11,6 +11,8 @@ Dataset:
   pcd_downsample_init: 1
 
 Light:
+  # Learning rate of the albedo (D97): absolute = opt_params.feature_lr.
+  albedo_lr: {mode: absolute}
   enabled: True
   shader:
     type: identity

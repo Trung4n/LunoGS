@@ -60,7 +60,7 @@ def test_sensor_depth_normals_come_from_the_sensor_not_the_map():
     from light_models.normals import SensorDepthFiniteDifference
 
     cam, pts, n_true = _sensor_camera()
-    src = SensorDepthFiniteDifference(stencil_px=1)
+    src = SensorDepthFiniteDifference(stencil_px=1, trusted_pixels_only=True)
     valid = torch.ones(pts.shape[1:], dtype=torch.bool)
     # The map's points are garbage (a staircase): the result must not care.
     stairs = pts.clone()
@@ -77,7 +77,7 @@ def test_sensor_depth_normals_respect_validity_and_missing_readings():
     cam.depth[10, 10] = 0.0  # no sensor reading
     valid = torch.ones(pts.shape[1:], dtype=torch.bool)
     valid[20, 20] = False  # not trusted by the G-buffer
-    _, ok = SensorDepthFiniteDifference(stencil_px=1)(pts, valid, None, cam)
+    _, ok = SensorDepthFiniteDifference(stencil_px=1, trusted_pixels_only=True)(pts, valid, None, cam)
     assert not ok[10, 10] and not ok[10, 11] and not ok[11, 10]
     assert not ok[20, 20] and ok[20, 21]
 
@@ -87,7 +87,7 @@ def test_sensor_depth_normals_need_a_depth_and_cache_per_camera():
 
     from light_models.normals import SensorDepthFiniteDifference
 
-    src = SensorDepthFiniteDifference(stencil_px=1)
+    src = SensorDepthFiniteDifference(stencil_px=1, trusted_pixels_only=True)
     cam, pts, _ = _sensor_camera()
     valid = torch.ones(pts.shape[1:], dtype=torch.bool)
     n1, _ = src(pts, valid, None, cam)
@@ -161,9 +161,37 @@ def test_sensor_edge_source_uses_edge_aware_differences():
 
     cam, pts, _ = _sensor_camera()
     valid = torch.ones(pts.shape[1:], dtype=torch.bool)
-    src = SensorDepthEdgeAwareFiniteDifference(stencil_px=1)
+    src = SensorDepthEdgeAwareFiniteDifference(stencil_px=1, trusted_pixels_only=True)
     assert src.requires_sensor_depth
     n, ok = src(pts, valid, None, cam)
     n_ref, ok_ref = EdgeAwareDepthFiniteDifference(stencil_px=1)(pts, valid, None, None)
     assert torch.equal(ok, ok_ref)
     torch.testing.assert_close(n, n_ref)
+
+
+# trusted_pixels_only (D99): false = the sensor normal does not depend on the
+# G-buffer's trust (map opacity), so holes of the map keep their n . l.
+
+@pytest.mark.parametrize("cls_name", ["SensorDepthFiniteDifference", "SensorDepthEdgeAwareFiniteDifference"])
+def test_untrusted_pixels_keep_their_sensor_normal(cls_name):
+    from light_models import normals
+
+    cam, pts, n_true = _sensor_camera()
+    valid = torch.ones(pts.shape[1:], dtype=torch.bool)
+    valid[18:22, 18:22] = False  # a low-opacity hole of the map
+    n_t, ok_t = getattr(normals, cls_name)(stencil_px=1, trusted_pixels_only=True)(pts, valid, None, cam)
+    n_u, ok_u = getattr(normals, cls_name)(stencil_px=1, trusted_pixels_only=False)(pts, valid, None, cam)
+    assert not ok_t[18:22, 18:22].any()
+    assert ok_u[18:22, 18:22].all()
+    torch.testing.assert_close(n_u[:, 18:22, 18:22], n_true[:, None, None].expand(3, 4, 4))
+    # elsewhere both agree
+    assert torch.equal(ok_t, ok_u & valid)
+    torch.testing.assert_close(n_t[:, ok_t], n_u[:, ok_t])
+
+
+@pytest.mark.parametrize("value", [None, 1, "true"])
+def test_trusted_pixels_only_validated(value):
+    from light_models.normals import SensorDepthFiniteDifference
+
+    with pytest.raises(ValueError, match="trusted_pixels_only"):
+        SensorDepthFiniteDifference(stencil_px=1, trusted_pixels_only=value)
