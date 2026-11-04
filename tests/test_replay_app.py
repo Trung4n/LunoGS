@@ -97,7 +97,7 @@ def server(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("app")
     light = _with_light_files(rec._record(tmp / "a", with_albedo=True))
     base = rec._record(tmp / "b", with_albedo=False)
-    state = ra.AppState("points")
+    state = ra.AppState("points", cache_dir=str(tmp / "cache"), runs_dir=str(tmp / "runs"))
     state.load(str(light), "light")
     ra.Handler.state = state
     httpd = ra.ThreadingHTTPServer(("127.0.0.1", 0), ra.Handler)
@@ -210,6 +210,62 @@ def test_image_metrics_of_the_recorded_images(server):
     obs, ren = (np.asarray(Image.open(rec_dir / f"000010_{k}.png").convert("RGB"), np.float64) / 255 for k in ("obs", "render"))
     assert m["psnr"][1][1] == pytest.approx(rm.psnr(ren, obs), abs=1e-4)
     assert rm.psnr(obs, obs) == float("inf")
+
+
+def _wait(metrics):
+    for _ in range(600):
+        if metrics.state not in ("idle", "running"):
+            return metrics.payload()
+        time.sleep(0.1)
+    raise AssertionError("metrics did not finish")
+
+
+def test_open_a_run_zip(tmp_path):
+    import zipfile
+
+    from utils.record_zip import zip_run
+
+    run_dir = _with_light_files(rec._record(tmp_path / "r"))
+    zip_path = zip_run(str(run_dir), str(tmp_path / "zips"))  # <experiment>__<time>.zip
+    name = os.path.splitext(os.path.basename(zip_path))[0]
+    state = ra.AppState("points", cache_dir=None, runs_dir=str(tmp_path / "runs"))
+    # listed before it is extracted
+    disc = state.discover([str(tmp_path / "zips")])
+    assert [d for d in disc if d["path"] == os.path.abspath(zip_path)][0]["run"].startswith(name)
+    i = state.load(zip_path)
+    dest = tmp_path / "runs" / name
+    assert state.runs[i].path == str(dest) and (dest / "record" / "meta.json").is_file()
+    assert state.runs[i].summary()["light_status"] == "learned"  # the per-run files came along
+    assert not [p for p in os.listdir(tmp_path / "runs") if p.startswith(".extracting")]
+    assert state.load(zip_path) == i  # extracted and loaded once
+    assert not [d for d in state.discover([str(tmp_path / "zips")]) if d["path"] == os.path.abspath(zip_path)]
+    # a zip that is not a run zip is refused, nothing written outside runs/
+    bad = tmp_path / "bad.zip"
+    with zipfile.ZipFile(bad, "w") as z:
+        z.writestr("bad/../../escape.txt", "x")
+    with pytest.raises(ValueError, match="not a run zip"):
+        state.load(str(bad))
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_image_metrics_start_on_load_and_are_cached(tmp_path):
+    run_dir = rec._record(tmp_path / "r")
+    state = ra.AppState("points", cache_dir=str(tmp_path / "cache"))
+    run = state.runs[state.load(str(run_dir))]
+    assert run.metrics.state != "idle"  # started by load, before any page asks
+    first = _wait(run.metrics)
+    assert first["state"] == "done" and not first["cached"] and len(first["psnr"]) == 4
+    assert os.listdir(tmp_path / "cache") == [os.path.basename(run.metrics.cache_path)]
+    again = rm.ImageMetrics(rr.Run(str(run_dir)), str(tmp_path / "cache"))
+    again.start()
+    second = _wait(again)
+    assert second["cached"] and second["psnr"] == first["psnr"] and second["ssim"] == first["ssim"]
+    # another recording at the same path (different frames): computed again
+    with open(run_dir / "record" / "frames.csv", "a", encoding="utf-8") as f:
+        f.write("\n")
+    other = rm.ImageMetrics(rr.Run(str(run_dir)), str(tmp_path / "cache"))
+    other.start()
+    assert not _wait(other)["cached"]
 
 
 @pytest.mark.parametrize("mode, extra", [

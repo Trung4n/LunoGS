@@ -221,6 +221,7 @@ def test_light_config_set():
         "rgbd_lambert_edgefd_albedolr_rel_x2.yaml",
         "rgbd_lambert_edgefd_albedolr_rel_x4.yaml",
         "rgbd_lambert_edgefd_untrusted.yaml",
+        "rgbd_lambert_edgefd_untrusted_lr_x2.yaml",
         "rgbd_nocos_depth_noise.yaml",
         "rgbd_nocos_depth_noise_heavy.yaml",
         "verify_shading.yaml",

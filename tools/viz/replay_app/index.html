@@ -89,7 +89,7 @@
           <div id="runlist"></div>
           <div class="sect">Mở bản ghi</div>
           <div class="openrow">
-            <input id="openpath" list="discovered" placeholder="Thư mục record (Windows hoặc WSL)" spellcheck="false">
+            <input id="openpath" list="discovered" placeholder="Thư mục record hoặc file .zip (Windows hoặc WSL)" spellcheck="false">
             <button id="openbtn">Mở</button>
           </div>
           <datalist id="discovered"></datalist>
@@ -131,6 +131,14 @@
     <label class="row">Đến frame <input id="exend" type="number"></label>
     <div id="exstatus" class="note"></div>
     <div class="dbuttons"><button id="excancel">Đóng</button><button id="exgo" class="primary">Xuất</button></div>
+  </div>
+</div>
+<div id="gate" class="gate hidden">
+  <div class="dialog">
+    <div class="dtitle">Đang tính PSNR / SSIM / LPIPS</div>
+    <p class="note">Tính một lần cho mỗi bản ghi rồi lưu cache (record/.replay_cache). Xong thì bắt đầu render.</p>
+    <div id="gate-runs"></div>
+    <div class="dbuttons"><button id="gate-skip">Bỏ qua, xem ngay</button></div>
   </div>
 </div>
 <div id="toast" class="toast hidden"></div>

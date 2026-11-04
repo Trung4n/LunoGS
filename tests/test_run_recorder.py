@@ -266,14 +266,14 @@ def test_pack_records_zips_each_run(tmp_path):
     root = "rgbd_nocos__office0_lit__2026-10-28/"
     assert root + "config.yml" in names and root + "record/meta.json" in names
     assert root + "timing.csv" in names and root + "light_learned.csv" not in names
-    assert root + "light_params.json" in names  # the fixed light values (D100)
+    assert root + "light_params.json" in names  # the fixed light values (D101)
     assert any(n.startswith(root + "record/maps/") for n in names)
     # unzipped, the folder is directly a --run of the replay tool
     assert _replay().Run(str(tmp_path / "unzipped" / root)).image_frames == [5, 10, 15, 20]
 
 
 def test_fixed_light_values_for_display(monkeypatch):
-    # D100: a run whose light is fixed shows the values it used, resolved from
+    # D101: a run whose light is fixed shows the values it used, resolved from
     # config.yml + light_params.json as SLAM resolves them.
     pytest.importorskip("torch")
     from utils.config_utils import load_config

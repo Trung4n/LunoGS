@@ -1,0 +1,10 @@
+# rgbd_lambert_edgefd_untrusted.yaml with twice the absolute colour learning
+# rate (docs/DECISIONS.md D102). On office0 the relative-lr x2 run (0.000229)
+# beat x1 (0.000113) by 0.8-1.0 dB in the cone, but those runs still dropped
+# the low-opacity normals, whose holes dominate the whole-frame PSNR. This
+# repeats the comparison without holes, with an absolute rate so the same
+# value also applies to room0.
+inherit_from: "configs/light/rgbd_lambert_edgefd_untrusted.yaml"
+
+opt_params:
+  feature_lr: 0.000226

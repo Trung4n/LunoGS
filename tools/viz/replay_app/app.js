@@ -21,7 +21,7 @@ const S = {
   layers: new Set(["est", "gt", "frustum", "kf"]),
   ceiling: false, ceilingTouched: false, trail: 300, trailTouched: false,
   thumbs: true, mini: true, orbitSec: 30, ptScale: 5, crisp: true,
-  free: null, freeVersion: 0, interacting: false, errLog: false,
+  free: null, freeVersion: 0, interacting: false, errLog: false, skipMetrics: false,
   panel: null, token: 0,
 };
 const D = new Map();          // run index -> {traj: Float32Array, row: Map(frame -> row)}
@@ -262,14 +262,38 @@ function loadMetrics(i) {
   if (m && (m.pending || m.state === "done" || m.state === "error")) return;
   M.set(i, { psnr: [], ssim: [], lpips: [], missing: {}, ...m, pending: true });
   const gen = metricsGen;
+  const settle = (data) => {
+    const was = gated();
+    M.set(i, data);
+    updateGate();
+    if (was && !gated()) show();          // the last one finished: start rendering
+    else updatePanel();
+  };
   api(`/api/metrics?run=${i}`).then((r) => r.json()).then((data) => {
     if (gen !== metricsGen) return;      // answer for an index that has shifted
-    M.set(i, data);
-    updatePanel();
-    if (data.state === "running") setTimeout(() => loadMetrics(i), 1500);
+    settle(data);
+    if (data.state === "running" || data.state === "idle") setTimeout(() => loadMetrics(i), gated() ? 400 : 1500);
   }).catch((e) => {
-    if (gen === metricsGen) M.set(i, { state: "error", message: e.message, psnr: [], ssim: [], lpips: [], missing: {} });
+    if (gen === metricsGen) settle({ state: "error", message: e.message, psnr: [], ssim: [], lpips: [], missing: {} });
   });
+}
+// Rendering waits until the image metrics are computed (both at once make the
+// views stutter), unless the user skips the wait. The server computes them
+// for every loaded run, shown or not, so the wait covers all of them.
+function gated() {
+  if (S.skipMetrics || !S.runs.length) return false;
+  return !S.runs.every((_, i) => ["done", "error"].includes(M.get(i)?.state));
+}
+function updateGate() {
+  const on = gated();
+  $("gate").classList.toggle("hidden", !on);
+  if (!on) return;
+  $("gate-runs").innerHTML = S.runs.map((r, i) => {
+    const m = M.get(i) || {};
+    const done = m.done || 0, pct = m.total ? Math.round((100 * done) / m.total) : 0;
+    return `<div class="grow"><span>${r.label}</span><span class="num">${done}/${m.total || "…"}</span>
+      <div class="bar"><i style="width:${pct}%"></i></div></div>`;
+  }).join("");
 }
 function snapIndex(run, f) {
   let k = 0;
@@ -565,6 +589,7 @@ async function serverView(v, f, token) {
 async function show() {
   drawTimeline();
   if (!S.frames.length) return;
+  if (gated()) { updateGate(); return; }
   const token = ++S.token;
   const f = curFrame();
   const run0 = activeRuns()[0];
@@ -587,7 +612,7 @@ async function show() {
 function tick(now) {
   const t = now / 1000;
   const f = curFrame();
-  if (f !== undefined && views.length) {
+  if (f !== undefined && views.length && !gated()) {
     const run0 = activeRuns()[0];
     views.forEach((v) => {
       const run = S.runs[v.i];
@@ -629,6 +654,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function setPlayIcon() { $("play").innerHTML = `<svg><use href="#i-${S.playing ? "pause" : "play"}"/></svg>`; }
 async function play() {
   if (S.playing) { S.playing = false; setPlayIcon(); return; }
+  if (gated()) return;
   if (S.idx >= S.frames.length - 1) S.idx = 0;
   S.playing = true;
   setPlayIcon();
@@ -951,7 +977,7 @@ function drawCharts() {
   runs.forEach((r, k) => {
     const row = lightAt(r, f);
     if (!row && r.light_fixed) {
-      // fixed light (D100): the values the run used, from config.yml + light_params.json
+      // fixed light (D101): the values the run used, from config.yml + light_params.json
       const fx = r.light_fixed;
       if (fx.phi) {
         xMax = Math.max(xMax, fx.phi_deg[fx.phi_deg.length - 1]);
@@ -1034,6 +1060,7 @@ async function pollExport() {
   }
 }
 function refreshAll() {
+  S.runs.forEach((_, i) => loadMetrics(i));
   computeFrames();
   buildStage();
   if (S.panel === "records") buildRecords();
@@ -1074,6 +1101,7 @@ function wire() {
   $("exportbtn").onclick = openExport;
   $("excancel").onclick = () => $("modal").classList.add("hidden");
   $("exgo").onclick = startExport;
+  $("gate-skip").onclick = () => { S.skipMetrics = true; updateGate(); show(); };
   ["error", "psnr", "ssim", "lpips", "gauss"].forEach(chartClick);
   wireTimeline();
   window.addEventListener("keydown", (e) => {

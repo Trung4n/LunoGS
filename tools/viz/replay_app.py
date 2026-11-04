@@ -2,6 +2,9 @@
 
     py tools/viz/replay_app.py record/office0_even_rgbd [more records ...]
 
+A record is a run folder, its record/ folder, or the run's zip
+(utils/record_zip.py), which is extracted once into record/runs/.
+
 Opens a local web page (black UI) to play a run recorded with slam.py
 --record back in time: the Gaussian map as it grows from a follow / overview
 / orbiting / free (mouse) camera, the observed, rendered, albedo and depth
@@ -103,7 +106,7 @@ def _defaults():
 class AppRun:
     """A loaded recording plus what the app needs on top of render_replay.Run."""
 
-    def __init__(self, path, label, renderer_kind):
+    def __init__(self, path, label, renderer_kind, cache_dir=None):
         self.path = os.path.abspath(path)
         self.run = rr.Run(self.path, label)
         r = self.run
@@ -121,7 +124,7 @@ class AppRun:
         self.top = float((pos @ self.up).max())
         self.err_cm = {i: float(np.linalg.norm(r.est_live[i][:3, 3] - r.gt[i][:3, 3]) * 100) for i in self.all_frames}
         self.ate = rm.ate_summary(r)
-        self.metrics = rm.ImageMetrics(r)  # started by the first /api/metrics
+        self.metrics = rm.ImageMetrics(r, cache_dir)  # started when loaded (AppState.load)
         follow = rr.FollowCamera(self.up, self.d.back, self.d.height, self.d.ahead, self.d.smoothing)
         self.follow_poses = {i: follow.update(r.est_live[i]) for i in self.all_frames}
         self.overview = rr.overview_pose(pos, self.up, math.radians(self.d.elevation), self.d.distance)
@@ -358,10 +361,55 @@ def load_static():
     return out
 
 
+# Image metrics of the recordings, computed once (replay_metrics.ImageMetrics).
+# Inside record/ (ignored by git), beside the recordings, never in them.
+METRICS_CACHE = os.path.join(REPO, "record", ".replay_cache")
+# Where run zips (utils/record_zip.py) are extracted when opened.
+RUNS_DIR = os.path.join(REPO, "record", "runs")
+
+
+def zip_run_name(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def extract_run_zip(path, runs_dir=RUNS_DIR):
+    """<runs_dir>/<experiment>__<time>/ from a run zip written by
+    utils/record_zip.py (every entry under that one folder, with
+    record/meta.json), extracted once; returns that folder."""
+    import shutil
+    import zipfile
+
+    name = zip_run_name(path)
+    dest = os.path.join(runs_dir, name)
+    if os.path.isfile(os.path.join(dest, "record", "meta.json")):
+        return dest
+    with zipfile.ZipFile(path) as z:
+        members = z.namelist()
+        outside = [m for m in members if not m.startswith(name + "/") or ".." in m.split("/")]
+        if outside:
+            raise ValueError(f"{path}: not a run zip (utils/record_zip.py): entries outside {name}/, "
+                             f"e.g. {outside[:3]}")
+        if f"{name}/record/meta.json" not in members:
+            raise ValueError(f"{path}: no {name}/record/meta.json in the zip (run slam.py with --record)")
+        # Extracted beside the destination, then renamed: an interrupted
+        # extraction never leaves a half folder that looks like a run.
+        tmp = os.path.join(runs_dir, f".extracting_{name}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        z.extractall(tmp)
+    os.makedirs(runs_dir, exist_ok=True)
+    if os.path.isdir(dest):  # a half folder from before (no record/meta.json)
+        shutil.rmtree(dest)
+    os.replace(os.path.join(tmp, name), dest)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return dest
+
+
 class AppState:
-    def __init__(self, renderer_kind):
+    def __init__(self, renderer_kind, cache_dir=METRICS_CACHE, runs_dir=RUNS_DIR):
         load_heavy()
         self.static = load_static()
+        self.cache_dir = cache_dir
+        self.runs_dir = runs_dir
         self.renderer_kind = renderer_kind
         self.runs = []
         self.lock = threading.Lock()  # one renderer call at a time (CUDA)
@@ -376,10 +424,14 @@ class AppState:
 
     def load(self, path, label=None):
         path = os.path.abspath(local_path(path))
+        if path.lower().endswith(".zip"):
+            path = extract_run_zip(path, self.runs_dir)
         for i, run in enumerate(self.runs):
             if run.path == path:
                 return i
-        run = AppRun(path, label, self.renderer_kind)
+        run = AppRun(path, label, self.renderer_kind, self.cache_dir)
+        # The page waits for these before rendering: start them right away.
+        run.metrics.start()
         self.runs.append(run)
         return len(self.runs) - 1
 
@@ -399,6 +451,12 @@ class AppState:
                     except (OSError, ValueError):
                         continue
                     found[rec] = name
+            # run zips not extracted yet (opening one extracts it into runs_dir)
+            for pattern in ("*.zip", "*/*.zip"):
+                for z in glob.glob(os.path.join(root, pattern)):
+                    name = zip_run_name(z)
+                    if not os.path.isfile(os.path.join(self.runs_dir, name, "record", "meta.json")):
+                        found[os.path.abspath(z)] = f"{name} (zip, giải nén khi mở)"
         return [{"path": p, "run": n} for p, n in sorted(found.items())]
 
     def start_export(self, run_ids, view, start, end):

@@ -100,7 +100,7 @@ class Run:
         self.config = _read_config(os.path.join(run_dir, "config.yml")) \
             or _read_config(os.path.join(self.dir, "config.yml"))
         self.light_status = light_status(self.meta, self.config, self.light)
-        # Fixed light values (D100): resolved from config.yml and the run's
+        # Fixed light values (D101): resolved from config.yml and the run's
         # copy of light_params.json; None if not fixed or a file is missing.
         self.light_fixed = None
         if self.light_status == "fixed":
@@ -182,7 +182,7 @@ PHI_GRID_DEG = np.arange(0.0, 90.0, 0.5)
 
 
 def fixed_light(config, params):
-    """The light values a run used when nothing was learned (D100), for
+    """The light values a run used when nothing was learned (D101), for
     display: {"scalars": {config path: value}, "phi_deg": [...], "phi": [...]}.
     Every ParamSpec of the Light block resolved as SLAM resolves it (perturb
     included); a 3x3 matrix (R_CL) is shown as the tilt of the light axis

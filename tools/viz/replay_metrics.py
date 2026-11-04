@@ -14,12 +14,17 @@ Image metrics  PSNR / SSIM / LPIPS of the RECORDED rendered image (at the
       the recorded observed image, over all pixels, as tools/verify/eval_map.py
       (SSIM of gaussian_splatting, LPIPS AlexNet of torchmetrics). They follow
       the run over time; they are not the final map quality of eval_map.py.
-      Computed on the CPU in a background thread (the GPU stays with the
-      renderer); SSIM needs torch, LPIPS needs torchmetrics.
+      Computed in a background thread as soon as the run is loaded, on the
+      GPU when there is one (the app waits for them before rendering), and
+      cached in <cache_dir>/<hash of the record path>.json; SSIM needs
+      torch, LPIPS needs torchmetrics.
 
 Display only: nothing here feeds back into SLAM. The reference trajectory is
 read for evaluation, as in eval_ate.
 """
+import hashlib
+import importlib.util
+import json
 import math
 import os
 import sys
@@ -94,7 +99,7 @@ def psnr(a, b):
 
 def _metric_functions():
     """(ssim(a, b) or None, lpips(a, b) or None, {metric: why it is missing}).
-    a, b: (H,W,3) float arrays in [0, 1]."""
+    a, b: (H,W,3) float arrays in [0, 1]. On the GPU when CUDA is available."""
     missing = {}
     try:
         import torch
@@ -102,9 +107,10 @@ def _metric_functions():
         from gaussian_splatting.utils.loss_utils import ssim as ssim_t
     except ImportError as exc:
         return None, None, {"ssim": f"cần torch ({exc})", "lpips": f"cần torch ({exc})"}
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def tensor(a):
-        return torch.tensor(np.ascontiguousarray(a.transpose(2, 0, 1)), dtype=torch.float32)[None]
+        return torch.tensor(np.ascontiguousarray(a.transpose(2, 0, 1)), dtype=torch.float32, device=device)[None]
 
     def ssim(a, b):
         with torch.no_grad():
@@ -114,7 +120,7 @@ def _metric_functions():
     try:
         from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-        net = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True)
+        net = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
 
         def lpips(a, b):
             with torch.no_grad():
@@ -124,19 +130,61 @@ def _metric_functions():
     return ssim, lpips, missing
 
 
+CACHE_VERSION = 1
+
+
 class ImageMetrics:
-    """Background computation of the image metrics of one run."""
+    """Background computation of the image metrics of one run, cached in
+    cache_dir (None: no cache)."""
 
-    _compute_lock = threading.Lock()  # one run at a time (CPU bound)
+    _compute_lock = threading.Lock()  # one run at a time
 
-    def __init__(self, run):
+    def __init__(self, run, cache_dir=None):
         self.run = run
         self.state = "idle"
         self.rows = []      # [frame, psnr, ssim | None, lpips | None]
         self.missing = {}
         self.message = ""
         self.total = len(run.image_frames)
+        self.cached = False
         self._lock = threading.Lock()
+        self.cache_path = None
+        if cache_dir is not None:
+            key = hashlib.sha1(os.path.abspath(run.dir).encode("utf-8")).hexdigest()[:16]
+            self.cache_path = os.path.join(cache_dir, f"{key}.json")
+
+    def _stamp(self):
+        """What the cached numbers were computed from: the recorded frames
+        (a re-extracted or different recording at the same path changes it)."""
+        csv_path = os.path.join(self.run.dir, "frames.csv")
+        return {"version": CACHE_VERSION, "record": os.path.abspath(self.run.dir),
+                "frames_csv_bytes": os.path.getsize(csv_path), "frames": self.run.image_frames}
+
+    def _read_cache(self):
+        if self.cache_path is None or not os.path.isfile(self.cache_path):
+            return False
+        try:
+            with open(self.cache_path, encoding="utf-8") as f:
+                c = json.load(f)
+        except (OSError, ValueError):
+            return False
+        if c.get("stamp") != self._stamp():
+            return False
+        # computed without LPIPS but torchmetrics is there now: compute again
+        if "lpips" in c["missing"] and importlib.util.find_spec("torchmetrics") is not None \
+                and "torchmetrics" in c["missing"]["lpips"]:
+            return False
+        self.rows, self.missing, self.cached = c["rows"], c["missing"], True
+        return True
+
+    def _write_cache(self):
+        if self.cache_path is None:
+            return
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+        tmp = self.cache_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"stamp": self._stamp(), "rows": self.rows, "missing": self.missing}, f)
+        os.replace(tmp, self.cache_path)
 
     def start(self):
         with self._lock:
@@ -153,6 +201,9 @@ class ImageMetrics:
 
     def _job(self):
         try:
+            if self._read_cache():
+                self.state = "done"
+                return
             with ImageMetrics._compute_lock:
                 ssim, lpips, self.missing = _metric_functions()
                 for f in self.run.image_frames:
@@ -167,6 +218,7 @@ class ImageMetrics:
                     row = [f, psnr(ren, obs), None if ssim is None else ssim(ren, obs), lp]
                     with self._lock:
                         self.rows.append(row)
+            self._write_cache()
             self.state = "done"
         except Exception as exc:  # noqa: BLE001 - reported to the UI
             self.message = f"{exc.__class__.__name__}: {exc}"
@@ -176,7 +228,7 @@ class ImageMetrics:
         with self._lock:
             rows = list(self.rows)
         out = {"state": self.state, "done": len(rows), "total": self.total, "missing": self.missing,
-               "message": self.message}
+               "message": self.message, "cached": self.cached}
         for k, name in enumerate(("psnr", "ssim", "lpips"), start=1):
             out[name] = [[r[0], round(r[k], 5)] for r in rows if r[k] is not None and math.isfinite(r[k])]
         return out

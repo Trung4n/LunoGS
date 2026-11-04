@@ -170,6 +170,14 @@ label.row:has(input[type=range]) { flex-wrap: wrap; }
 .dbuttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 .dbuttons button { border-color: var(--hair2); }
 #exstatus a { color: var(--accent); }
+/* waiting for the image metrics before rendering */
+.gate { position: fixed; top: 38px; bottom: 44px; left: 0; right: 40px; background: rgba(0, 0, 0, .92);
+  display: flex; align-items: center; justify-content: center; z-index: 10; }
+.gate .grow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; margin-top: 10px; }
+.gate .grow span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gate .num { font-family: var(--mono); color: var(--dim); }
+.gate .bar { grid-column: 1 / -1; height: 3px; background: var(--hair2); }
+.gate .bar i { display: block; height: 100%; background: var(--accent); }
 .toast { position: fixed; bottom: 54px; left: 50%; transform: translateX(-50%); background: #1a0f0f;
   border: 1px solid #5a2626; color: var(--bright); padding: 7px 12px; z-index: 30; max-width: 70vw; }
 
