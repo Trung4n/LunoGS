@@ -175,15 +175,57 @@ class Spline:
         return torch.cat([torch.ones(1, dtype=self.knot_values.dtype), self.knot_values])
 
     def __call__(self, cos_theta):
-        dev, dt = cos_theta.device, cos_theta.dtype
-        # Ascending cos (descending theta) for bucketize.
-        a = self.cos_knots.to(dev, dt).flip(0)
-        va = self.values().to(dev, dt).flip(0)
-        c = cos_theta.clamp(min=float(a[0]), max=float(a[-1]))
-        hi = torch.bucketize(c.detach(), a).clamp(1, a.numel() - 1)
-        lo = hi - 1
-        t = (c - a[lo]) / (a[hi] - a[lo])
-        return va[lo] + t * (va[hi] - va[lo])
+        return _linear_in_cos(self.cos_knots, self.values(), cos_theta)
+
+
+def _linear_in_cos(cos_knots, values, cos_theta):
+    """Phi at cos_theta, linear in cos(theta) between the knots (cos_knots in
+    knot order, i.e. decreasing); beyond the last knot the last value."""
+    dev, dt = cos_theta.device, cos_theta.dtype
+    # Ascending cos (descending theta) for bucketize.
+    a = cos_knots.to(dev, dt).flip(0)
+    va = values.to(dev, dt).flip(0)
+    c = cos_theta.clamp(min=float(a[0]), max=float(a[-1]))
+    hi = torch.bucketize(c.detach(), a).clamp(1, a.numel() - 1)
+    lo = hi - 1
+    t = (c - a[lo]) / (a[hi] - a[lo])
+    return va[lo] + t * (va[hi] - va[lo])
+
+
+@register("angular", "tabulated", numeric=("knots_deg", "values"), options=("interpolation",))
+class Tabulated:
+    """Fixed emission profile given as a TABLE read from the params file, e.g.
+    the profile measured by the pre-calibration (tools/calibrate/fit_light.py,
+    docs/DECISIONS.md D106): Phi(knots_deg[i]) = values[i], interpolated as
+    the spline (`interpolation`: linear_cos), the last value beyond the last
+    knot. knots_deg: start at 0, strictly increasing, below 90; values >= 0,
+    as stored (no normalisation: the scale K x Phi is what the file holds).
+    Not learnable itself: to refine a measured profile in mapping, use a
+    spline whose `init` is this block."""
+
+    def __init__(self, knots_deg, values, interpolation):
+        where = "Light.angular"
+        for spec in (knots_deg, values):
+            if spec.learnable:
+                raise NotImplementedError(
+                    f"{spec.name}: a tabulated profile is fixed; learn it as a spline with init: tabulated")
+        k, v = knots_deg.value, values.value
+        if (not isinstance(k, list) or len(k) < 2
+                or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in k)):
+            raise ValueError(f"{where}.knots_deg must be a list of >= 2 numbers, got {k!r}")
+        if k[0] != 0 or any(b <= a for a, b in zip(k, k[1:])) or k[-1] >= 90:
+            raise ValueError(f"{where}.knots_deg must start at 0, increase strictly and stay below 90, got {k!r}")
+        if (not isinstance(v, list) or len(v) != len(k)
+                or any(isinstance(x, bool) or not isinstance(x, (int, float)) or x < 0 for x in v)):
+            raise ValueError(f"{where}.values must be {len(k)} numbers >= 0 (one per knot), got {v!r}")
+        if interpolation not in Spline.INTERPOLATIONS:
+            raise ValueError(f"{where}.interpolation must be one of {Spline.INTERPOLATIONS}, got {interpolation!r}")
+        self.knots_deg = knots_deg.tensor()
+        self.values = values.tensor()
+        self.cos_knots = torch.cos(self.knots_deg * (math.pi / 180.0))
+
+    def __call__(self, cos_theta):
+        return _linear_in_cos(self.cos_knots, self.values, cos_theta)
 
 
 # smoothstep: generic profile in THETA with theta_in / theta_out (CLAUDE.md

@@ -1,0 +1,32 @@
+# Pre-calibration + simultaneous calibration (docs/DECISIONS.md D106, D65):
+# rgbd_lambert_calib.yaml, but the lamp keeps learning in MAPPING from its
+# calibrated values (never in tracking): the emission profile as the spline
+# of D67 started from the calibrated table, the 2 tilts of the axis, and t_CL
+# with the weak prior of rgbd_nocos_learn_all.yaml (least observable, D59);
+# K stays the unit (D65). Learning rates: spline and tilt as the
+# self-calibration (rgbd_nocos_selfcal.yaml), t_CL as learn_all, TO CONFIRM.
+# Schedule as the self-calibration except the spline, which starts with c
+# (it is calibrated, not flat).
+inherit_from: "configs/light/rgbd_lambert_calib.yaml"
+
+Light:
+  pose:
+    t_CL: {learnable: true, lr: 0.0001, prior_weight: 1.0}
+    R_CL: {learnable: true, lr: 0.01, prior_weight: 0.0}
+  angular:
+    _replace: true
+    type: spline
+    # Coarse in the core, dense at the edge, as configs/calib/fit_spline_core_coarse.yaml:
+    # 2-deg knots near the axis let K and the first segment trade off (D106).
+    knots_deg: [0, 8, 14, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 36, 40, 45, 50]
+    interpolation: linear_cos
+    init:
+      type: tabulated
+      knots_deg: {source: params_file, key: light.angular.knots_deg, learnable: false}
+      values: {source: params_file, key: light.angular.knot_values, learnable: false}
+      interpolation: linear_cos
+    learn: {learnable: true, lr: 0.01, prior_weight: 0.0}
+    smoothness_weight: 0.0
+  schedule:
+    - {after_keyframes: 10, unfreeze: [ambient.c, angular.knot_values, pose.R_CL]}
+    - {after_keyframes: 30, unfreeze: [pose.t_CL]}

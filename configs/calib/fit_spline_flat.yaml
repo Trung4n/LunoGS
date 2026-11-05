@@ -1,0 +1,19 @@
+# Pre-calibration fit with NO knowledge of the cone (docs/DECISIONS.md D106):
+# fit_spot_datasheet.yaml with the emission profile as the explicit spline of
+# D67 learned from a flat start, the form meant for real lamps whose profile
+# has no known formula (instead of neuralight's MLP, D65).
+inherit_from: "configs/calib/fit_spot_datasheet.yaml"
+
+Light:
+  angular:
+    _replace: true
+    type: spline
+    knots_deg: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50]
+    interpolation: linear_cos
+    init: {type: uniform}
+    learn: {learnable: true, lr: 0.01, prior_weight: 0.0}
+    smoothness_weight: 0.01  # TO CONFIRM: without it the first segment drops and K compensates (D106)
+  schedule:  # a list replaces the inherited one as a whole
+    - {after_keyframes: 0, unfreeze: [intensity, ambient.c, angular.knot_values]}
+    - {after_keyframes: 1, unfreeze: [pose.R_CL]}
+    - {after_keyframes: 2, unfreeze: [pose.t_CL]}

@@ -150,6 +150,10 @@ _FAKE_PARAMS = {
     "cone": {"half_angle_deg_estimated": 30.0, "blend_estimated": 0.35,
              "half_angle_deg_config": 30.0, "blend_config": 0.35},
     "ambient": {"c_estimated": 0.12, "c_config": 0.12},
+    # Shape of tools/calibrate/fit_light.py's result (D106).
+    "light": {"intensity": 30.0, "t_CL_m": [0.0, -0.05, 0.0], "R_CL": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+              "angular": {"type": "spline", "knots_deg": [0, 10, 20, 30, 40],
+                          "knot_values": [1.0, 1.0, 1.0, 0.2, 0.0]}},
 }
 
 
@@ -222,6 +226,8 @@ def test_light_config_set():
         "rgbd_lambert_edgefd_albedolr_rel_x4.yaml",
         "rgbd_lambert_edgefd_untrusted.yaml",
         "rgbd_lambert_edgefd_untrusted_lr_x2.yaml",
+        "rgbd_lambert_calib.yaml",
+        "rgbd_lambert_calib_learn.yaml",
         "rgbd_nocos_depth_noise.yaml",
         "rgbd_nocos_depth_noise_heavy.yaml",
         "verify_shading.yaml",

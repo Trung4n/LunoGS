@@ -1,0 +1,46 @@
+# Synthetic calibration clip (tools/calibrate/make_synthetic.py,
+# docs/DECISIONS.md D106): the office0 lamp as configured in Blender (the
+# *_config keys of office0/lit/light_params.json), except the light axis,
+# deliberately tilted 3 deg about the camera x axis so that the fit has a
+# non-trivial axis to recover (the Replica rig has none).
+#
+# Target albedo: the lamp is bright for a white card (K x A / d^2 = 1 at
+# ~4.9 m for A = 0.8 with the office0 K), so nearly the whole cone would
+# saturate at fixed exposure. A dark grey card (linear 0.05) keeps most of the
+# cone unsaturated between 0.8 and 4 m, a choice a real capture has to make
+# too (target reflectance vs lamp power and exposure).
+Light:
+  shader:
+    type: colocated
+  intensity: {source: params_file, key: intensity.K_theory, learnable: false}
+  pose:
+    t_CL: {source: params_file, key: t_CL_m.config_opencv, learnable: false}
+    R_CL: {source: params_file, key: R_CL.config, learnable: false,
+           perturb: {rotate_deg: 3.0, axis: [1.0, 0.0, 0.0]}}
+  falloff:
+    type: inverse_square
+  angular:
+    type: blender_spot
+    half_angle_deg: {source: params_file, key: cone.half_angle_deg_config, learnable: false}
+    blend: {source: params_file, key: cone.blend_config, learnable: false}
+  cosine:
+    type: lambert
+    normal_source: {type: gbuffer}
+    warmup_keyframes: 0
+  ambient:
+    type: multiplicative_const
+    c: {source: params_file, key: ambient.c_config, learnable: false}
+  gbuffer:
+    opacity_thr: 0.5
+
+Synthetic:
+  # office0 camera (light_params.json camera block), integer pixel centres.
+  intrinsics: {fx: 300.0, fy: 300.0, cx: 299.5, cy: 169.5, width: 600, height: 340}
+  depth_scale: 6553.5  # as the MonoGS datasets (configs/rgbd/replica/base_config.yaml)
+  n_frames: 40         # neuralight uses ~40 images per light configuration
+  distance_m: [0.8, 4.0]
+  max_tilt_deg: 60
+  target_albedo: [0.05, 0.05, 0.05]
+  jpeg_quality: 98     # as the renders (Replica/scripts/render_sequence.py)
+  depth_noise_m: 0.0
+  seed: 0

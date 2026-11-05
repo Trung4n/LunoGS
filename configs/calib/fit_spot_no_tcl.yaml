@@ -1,0 +1,9 @@
+# fit_spot_datasheet.yaml without measuring the light position
+# (docs/DECISIONS.md D106): t_CL starts at the camera centre (0, 0, 0), i.e.
+# nothing about the mount is known, and is learned like the rest. Tests
+# whether the clip alone fixes t_CL (the datasheet start was only 1 cm off).
+inherit_from: "configs/calib/fit_spot_datasheet.yaml"
+
+Light:
+  pose:
+    t_CL: {_replace: true, source: value, value: [0.0, 0.0, 0.0], learnable: true, lr: 0.0002, prior_weight: 0.0}

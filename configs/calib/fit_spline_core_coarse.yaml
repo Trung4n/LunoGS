@@ -1,0 +1,14 @@
+# fit_spline_no_tcl.yaml with knots coarse in the core and dense at the edge
+# (docs/DECISIONS.md D106). On the Blender clips the 2-deg knots let K and the
+# first spline segment trade off: few pixels lie within 2 deg of the axis, so
+# K rose (+59% office0, +120% room0) and the knots from 2 deg down, leaving
+# K x Phi far too high on a small disc around the axis. A first segment of
+# 8 deg covers thousands of pixels per frame, which pins Phi(0) = 1 to the
+# data. Dense knots (1 deg) where the profile falls, coarser beyond. No
+# smoothness penalty: its second differences assume uniform knot spacing.
+inherit_from: "configs/calib/fit_spline_no_tcl.yaml"
+
+Light:
+  angular:
+    knots_deg: [0, 8, 14, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 36, 40, 45, 50]
+    smoothness_weight: 0.0

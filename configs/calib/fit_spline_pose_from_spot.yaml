@@ -1,0 +1,20 @@
+# Second pass of a two-pass pre-calibration (docs/DECISIONS.md D106), as
+# neuralight fits a coarse profile with the light pose first, then freezes the
+# pose and fits its free-form profile: the light pose (t_CL, R_CL) is read
+# from the result JSON of fit_spot_datasheet.yaml (pass --params <that json>)
+# and kept FIXED; only K, the ambient of the calibration room and the
+# spline profile (flat start) are fitted. Reason: fitted together with the
+# pose, the spline traded its representation error and the K / Phi(0) scale
+# for a 12 mm shift of t_CL along z (fit_spline_flat.yaml on the synthetic
+# clip).
+inherit_from: "configs/calib/fit_spline_flat.yaml"
+
+Light:
+  pose:
+    t_CL: {_replace: true, source: params_file, key: light.t_CL_m, learnable: false}
+    R_CL: {_replace: true, source: params_file, key: light.R_CL, learnable: false}
+  schedule:
+    - {after_keyframes: 0, unfreeze: [intensity, ambient.c, angular.knot_values]}
+
+Calibration:
+  stages: [1200]

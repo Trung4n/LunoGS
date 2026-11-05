@@ -1,0 +1,11 @@
+# One-pass pre-calibration with the spline profile and NO measurement of the
+# light position (docs/DECISIONS.md D106): fit_spline_flat.yaml (spline from
+# a flat start, K and c guessed) with t_CL starting at the camera centre, as
+# fit_spot_no_tcl.yaml. If the pose comes out within the tolerances of D59
+# this replaces the two-pass procedure (parametric profile for the pose, then
+# the spline); otherwise a generic parametric profile is needed for pass 1.
+inherit_from: "configs/calib/fit_spline_flat.yaml"
+
+Light:
+  pose:
+    t_CL: {_replace: true, source: value, value: [0.0, 0.0, 0.0], learnable: true, lr: 0.0002, prior_weight: 0.0}

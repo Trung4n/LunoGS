@@ -1,0 +1,53 @@
+# Pre-calibration fit, "datasheet" start (tools/calibrate/fit_light.py,
+# docs/DECISIONS.md D106): the parametric spot form, every parameter learned
+# from what a real rig would know before calibrating:
+#   K       a guess (lamp power unknown), source value;
+#   cone    the nominal half angle / blend off by a datasheet-like tolerance
+#           (+3 deg, x 0.7);
+#   t_CL    the mount design value (ruler) off by 1 cm;
+#   R_CL    the nominal "light along the camera axis" (identity);
+#   c       a guess for the ambient light of the calibration room.
+# Starting values are read from a light_params.json (*_config keys) so that
+# no number of the lamp is written here; the errors are the perturb blocks.
+#
+# Stages (Light.schedule read as stages by fit_light.py): intensity and
+# ambient first, then the cone and the axis, then the light position, as
+# neuralight fits a coarse profile before the pose. Learning rates and step
+# counts TO CONFIRM on the synthetic clip.
+Light:
+  shader:
+    type: colocated
+  intensity: {source: value, value: 10.0, learnable: true, lr: 0.1, prior_weight: 0.0}
+  pose:
+    t_CL: {source: params_file, key: t_CL_m.config_opencv, learnable: true, lr: 0.0002, prior_weight: 0.0,
+           perturb: {add: [0.0, 0.01, 0.0]}}
+    R_CL: {source: value, value: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], learnable: true, lr: 0.02, prior_weight: 0.0}
+  falloff:
+    type: inverse_square
+  angular:
+    type: blender_spot
+    half_angle_deg: {source: params_file, key: cone.half_angle_deg_config, learnable: true, lr: 0.02,
+                     prior_weight: 0.0, perturb: {add: 3.0}}
+    blend: {source: params_file, key: cone.blend_config, learnable: true, lr: 0.002, prior_weight: 0.0,
+            perturb: {scale: 0.7}}
+  cosine:
+    type: lambert
+    normal_source: {type: gbuffer}
+    warmup_keyframes: 0
+  ambient:
+    type: multiplicative_const
+    c: {source: value, value: 0.05, learnable: true, lr: 0.001, prior_weight: 0.0, at_bound: project}
+  gbuffer:
+    opacity_thr: 0.5
+  schedule:
+    - {after_keyframes: 0, unfreeze: [intensity, ambient.c]}
+    - {after_keyframes: 1, unfreeze: [angular.half_angle_deg, angular.blend, pose.R_CL]}
+    - {after_keyframes: 2, unfreeze: [pose.t_CL]}
+
+Calibration:
+  target_albedo: [0.05, 0.05, 0.05]  # nominal reflectance of the card (gauge of K, D73)
+  plane_inlier_m: 0.01
+  plane_iters: 3
+  sat_8bit: 250                      # as eval_map / the SLAM saturation mask
+  loss_color_space: linear
+  stages: [300, 600, 600]
