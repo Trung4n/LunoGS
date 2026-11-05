@@ -45,6 +45,9 @@ class LearnableParam:
     # Steps whose value project() moved back onto the domain boundary
     # (ParamSpec at_bound: project, D70); None when not counted.
     n_at_bound: int = None
+    # 0/1 tensor of the parameter's shape: elements with 0 keep their value
+    # (ParamSpec learn_mask, D108); None = every element learns.
+    grad_mask: torch.Tensor = None
 
 
 def make_learnable(path, tensor, spec, check=None, project=None):
@@ -58,13 +61,22 @@ def make_learnable(path, tensor, spec, check=None, project=None):
             f"Light.{path}: learnable is not supported for this form or shape "
             "(the component does not keep the parameter as a leaf tensor)"
         )
+    mask = None
+    if spec.learn_mask is not None:
+        mask = torch.tensor(spec.learn_mask, dtype=tensor.dtype)
+        if mask.shape != tensor.shape:
+            raise NotImplementedError(
+                f"Light.{path}: learn_mask of shape {tuple(mask.shape)} does not match the learned "
+                f"tensor {tuple(tensor.shape)} (e.g. R_CL learns 2 tilts, not the 3x3 matrix)"
+            )
     if spec.at_bound == "project":
         if project is None:
             raise NotImplementedError(f"Light.{path}: at_bound project is not supported for this parameter")
         return LearnableParam(path, tensor, tensor.detach().clone(), float(spec.lr),
-                              float(spec.prior_weight), check=check, project=project, n_at_bound=0)
+                              float(spec.prior_weight), check=check, project=project, n_at_bound=0,
+                              grad_mask=mask)
     return LearnableParam(path, tensor, tensor.detach().clone(), float(spec.lr),
-                          float(spec.prior_weight), check=check)
+                          float(spec.prior_weight), check=check, grad_mask=mask)
 
 
 def read_schedule(light_cfg, learnable):
@@ -151,6 +163,9 @@ class LightLearner:
         for path, p in self.params.items():
             if path not in active:
                 p.tensor.grad = None
+            elif p.grad_mask is not None and p.tensor.grad is not None:
+                # Masked elements get no gradient, hence no Adam step (D108).
+                p.tensor.grad.mul_(p.grad_mask.to(p.tensor.grad.device))
         if active:
             self.optimizer.step()
             for path in active:

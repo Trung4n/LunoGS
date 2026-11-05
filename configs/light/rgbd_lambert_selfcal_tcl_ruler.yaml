@@ -1,0 +1,46 @@
+# Self-calibration on the CURRENT main model (docs/DECISIONS.md D108):
+# rgbd_lambert_edgefd_untrusted.yaml (edge-aware sensor normals, untrusted
+# pixels kept) with the self-calibration mode of rgbd_nocos_selfcal.yaml /
+# rgbd_lambert_selfcal.yaml (D70, D87), which ran on the older normals:
+#   K      1, a unit (only c / K is observable, D65);
+#   c'     learned from the guess of rgbd_nocos_learn_k1.yaml, at_bound project;
+#   Phi    spline learned from flat. Knots: a first segment of 8 deg, then
+#          every 2 deg, so the first segment covers enough pixels to pin
+#          Phi(0) = 1 (D106); no assumption on where the cone edge is;
+#   R_CL   2 tilts learned from the nominal mount (identity);
+#   t_CL   THE RULER MEASUREMENT (t_CL_m.config_opencv) refined with a weak
+#          prior: the reference for the variants without measurement
+#          (rgbd_lambert_selfcal_tcl_zero / _xy / _fixed0).
+# Colour learning rate: with K = 1 the albedo is ~K times larger, so the
+# default absolute feature_lr (0.0025) gives about the relative albedo step
+# of the main model's 0.000113 at the calibrated K (D90-D92).
+# Schedule as rgbd_nocos_selfcal.yaml.
+inherit_from: "configs/light/rgbd_lambert_edgefd_untrusted.yaml"
+
+opt_params:
+  feature_lr: 0.0025
+
+Light:
+  intensity: {_replace: true, source: value, value: 1.0, learnable: false}
+  pose:
+    t_CL: {_replace: true, source: params_file, key: t_CL_m.config_opencv, learnable: true, lr: 1.0e-4,
+           prior_weight: 1.0}
+    R_CL: {_replace: true, source: value, value: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], learnable: true, lr: 0.01,
+           prior_weight: 0.0}
+  angular:
+    _replace: true
+    type: spline
+    knots_deg: [0, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50]
+    interpolation: linear_cos
+    init: {type: uniform}
+    learn: {learnable: true, lr: 0.01, prior_weight: 0.0}
+    smoothness_weight: 0.0
+  ambient:
+    c: {_replace: true, source: value, value: 0.01, learnable: true, lr: 2.0e-5, prior_weight: 0.0,
+        at_bound: project}
+  init_albedo:
+    min_shading: 0.001  # shading units shrink with K = 1 (rgbd_nocos_learn_k1.yaml)
+  schedule:
+    - {after_keyframes: 3, unfreeze: [angular.knot_values]}
+    - {after_keyframes: 10, unfreeze: [ambient.c, pose.R_CL]}
+    - {after_keyframes: 30, unfreeze: [pose.t_CL]}

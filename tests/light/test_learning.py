@@ -310,3 +310,51 @@ def test_at_bound_validated(block, error):
 
     with pytest.raises(error):
         resolve_param(block, "Light.ambient.c", None)
+
+
+# ---- learn_mask (D108) ----------------------------------------------------------
+
+def _tcl_config(mask):
+    cfg = _config(schedule=[{"after_keyframes": 0, "unfreeze": ["pose.t_CL"]}])
+    t = {"source": "value", "value": [0.0, 0.0, 0.0], "learnable": True, "lr": 0.01, "prior_weight": 0.0}
+    if mask is not None:
+        t["learn_mask"] = mask
+    cfg["Light"]["pose"]["t_CL"] = t
+    return cfg
+
+
+def test_learn_mask_keeps_the_masked_elements():
+    shader = build_shader(_tcl_config([True, True, False]), PARAMS)
+    learner = LightLearner(shader.learnable_params())
+    for _ in range(5):
+        out = shader(_gbuffer(torch.full((3, H, W), 0.1)), CAM)["radiance_linear"]
+        # Pushes every element of t_CL: the loss depends on x, y and z.
+        (out.sum() + (shader.t_CL * torch.tensor([1.0, 1.0, 1.0])).sum()).backward()
+        learner.step(1)
+    t = shader.t_CL.detach()
+    assert t[2] == 0.0
+    assert abs(float(t[0])) > 0 and abs(float(t[1])) > 0
+
+
+@pytest.mark.parametrize("mask, error", [
+    ([True, False], "shape"),
+    ([1, 1, 0], "booleans"),
+    ([False, False, False], "no element learns"),
+])
+def test_learn_mask_validated(mask, error):
+    with pytest.raises(ValueError, match=error):
+        build_shader(_tcl_config(mask), PARAMS)
+
+
+def test_learn_mask_only_on_learnable_and_matching_the_learned_tensor():
+    cfg = _config()
+    cfg["Light"]["pose"]["t_CL"] = {"source": "value", "value": [0.0, 0.0, 0.0], "learnable": False,
+                                     "learn_mask": [True, True, False]}
+    with pytest.raises(ValueError, match="unexpected keys"):
+        build_shader(cfg, PARAMS)
+    # R_CL learns 2 tilts: a 3x3 mask cannot apply.
+    cfg = _config(rcl={"learnable": True, "lr": 0.01, "prior_weight": 0.0,
+                       "learn_mask": [[True] * 3] * 3},
+                  schedule=[{"after_keyframes": 0, "unfreeze": ["pose.R_CL"]}])
+    with pytest.raises(NotImplementedError, match="2 tilts"):
+        build_shader(cfg, PARAMS)

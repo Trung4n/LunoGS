@@ -10,6 +10,7 @@
 #     prior_weight: <number>      # required iff learnable; 0 = no penalty
 #     perturb: <block>            # optional, see below
 #     at_bound: error | project   # optional, learnable only, see below
+#     learn_mask: <bools>         # optional, learnable only, see below
 #
 # Nothing has a default. Keys that do not belong (e.g. lr on a fixed
 # parameter, key with source: value) are errors as well, so a typo cannot
@@ -37,6 +38,13 @@
 # so it is never silent. Only forms with a defined projection accept project
 # (ambient c >= 0); the others refuse it when the shader is built.
 #
+# learn_mask (docs/DECISIONS.md D108): which elements of a learnable vector
+# are learned, booleans of the value's shape, e.g. [true, true, false] for
+# t_CL = learn the lateral offset, keep the depth along the optical axis
+# (the least observable direction, D106, D107). The other elements keep
+# their value (their gradient is zeroed before every step). Absent = every
+# element learns, the behaviour before D108. At least one element must learn.
+#
 # Parsing does not import torch; ParamSpec.tensor() does, lazily.
 
 import json
@@ -63,6 +71,7 @@ class ParamSpec:
     nominal: object = None  # value before `perturb`, None if not perturbed
     perturb: object = None  # the perturb block, None if not perturbed
     at_bound: str = "error"  # learnable only: "error" | "project" (D70)
+    learn_mask: object = None  # learnable only: bools of the value's shape (D108), None = all
 
     def tensor(self):
         """CPU float32 tensor of the value (requires_grad iff learnable).
@@ -216,7 +225,7 @@ def resolve_param(block, where, params_data):
         for name, v in (("lr", lr), ("prior_weight", prior_weight)):
             if isinstance(v, bool) or not isinstance(v, numbers.Real) or v < 0:
                 raise ValueError(f"{where}.{name} must be a number >= 0, got {v!r}")
-        allowed.update(("lr", "prior_weight", "at_bound"))
+        allowed.update(("lr", "prior_weight", "at_bound", "learn_mask"))
     at_bound = block.get("at_bound", "error") if learnable else "error"
     if at_bound not in _AT_BOUND:
         raise ValueError(f"{where}.at_bound must be one of {_AT_BOUND}, got {at_bound!r}")
@@ -229,12 +238,22 @@ def resolve_param(block, where, params_data):
             f"(source={source}, learnable={learnable} allows {sorted(allowed)})"
         )
     _check_numeric(value, where)
+    learn_mask = block.get("learn_mask") if learnable else None
+    if learn_mask is not None:
+        flat = learn_mask if isinstance(learn_mask, list) else [learn_mask]
+        flat = [x for row in flat for x in (row if isinstance(row, list) else [row])]
+        if _shape(learn_mask) != _shape(value) or not all(isinstance(x, bool) for x in flat):
+            raise ValueError(f"{where}.learn_mask must be booleans of the value's shape {_shape(value)}, "
+                             f"got {learn_mask!r}")
+        if not any(flat):
+            raise ValueError(f"{where}.learn_mask: no element learns; use learnable: false")
     if "perturb" not in block:
-        return ParamSpec(where, value, source, key, learnable, lr, prior_weight, at_bound=at_bound)
+        return ParamSpec(where, value, source, key, learnable, lr, prior_weight, at_bound=at_bound,
+                         learn_mask=learn_mask)
     perturbed = _apply_perturb(value, block["perturb"], where)
     # Printed so the log of a sensitivity run shows the value actually used.
     from utils.logging_utils import Log
 
     Log(f"{where} perturbed by {block['perturb']}: {value} -> {perturbed}", tag="Light")
     return ParamSpec(where, perturbed, source, key, learnable, lr, prior_weight,
-                     nominal=value, perturb=block["perturb"], at_bound=at_bound)
+                     nominal=value, perturb=block["perturb"], at_bound=at_bound, learn_mask=learn_mask)

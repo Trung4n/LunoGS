@@ -1,0 +1,12 @@
+# Control for D108: rgbd_lambert_selfcal_tcl_ruler.yaml with the light
+# position IGNORED, t_CL fixed at the camera centre (0, 0, 0), i.e. the lamp
+# assumed exactly co-located with the camera. Measures what the 5 cm offset
+# of the data costs when nothing estimates it (D59 went up to 2 cm).
+inherit_from: "configs/light/rgbd_lambert_selfcal_tcl_ruler.yaml"
+
+Light:
+  pose:
+    t_CL: {_replace: true, source: value, value: [0.0, 0.0, 0.0], learnable: false}
+  schedule:  # a list replaces the inherited one as a whole
+    - {after_keyframes: 3, unfreeze: [angular.knot_values]}
+    - {after_keyframes: 10, unfreeze: [ambient.c, pose.R_CL]}
