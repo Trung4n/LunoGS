@@ -1,0 +1,10 @@
+# The main model without MonoGS's near-black pixel filter (docs/DECISIONS.md D116):
+# Training.rgb_boundary_threshold below any pixel value, so black pixels get
+# Gaussians and stay in the losses. The filter is meant for the black borders of
+# undistorted images; on a scene without ambient light it also removes every
+# real surface outside the cone (55% of the image of amb_0, with valid depth),
+# and the depth loss then stretches the Gaussians around those holes.
+inherit_from: "configs/light/rgbd_lambert_calib.yaml"
+
+Training:
+  rgb_boundary_threshold: -1.0

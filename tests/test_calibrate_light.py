@@ -139,3 +139,31 @@ def test_light_values_report_the_tilt_of_the_axis():
     # 3 deg about the camera x axis turns the axis towards -y.
     np.testing.assert_allclose(got["light_axis_tilt_deg"], [0.0, -3.0], atol=1e-9)
     assert math.isclose(np.linalg.det(np.array(got["R_CL"])), 1.0, rel_tol=1e-9)
+
+
+# ---- scale_calibration.py (D115) -------------------------------------------------
+
+def test_scaled_calibration_only_changes_the_intensity_and_records_it():
+    sc = _load("scale_calibration")
+    base = {"light": {"intensity": 30.0, "t_CL_m": [0.0, -0.05, 0.0], "angular": {"knot_values": [1.0, 0.0]}},
+            "provenance": {"clip": "c"}}
+    out = sc.scaled(base, 0.1, "source.json")
+    assert out["light"]["intensity"] == pytest.approx(3.0)
+    assert out["light"]["t_CL_m"] == base["light"]["t_CL_m"]
+    assert out["light"]["angular"] == base["light"]["angular"]
+    assert out["provenance"] == {"derived_from": "source.json", "intensity_scale": 0.1, "fit_provenance": {"clip": "c"}}
+    assert base["light"]["intensity"] == 30.0  # the input is not modified
+    assert sc.scaled({"light": {"intensity": [1.0, 2.0, 3.0]}}, 2.0, "s")["light"]["intensity"] == [2.0, 4.0, 6.0]
+
+
+@pytest.mark.parametrize("scale", [0, -1.0, True, "2"])
+def test_scaled_calibration_rejects_a_bad_scale(scale):
+    sc = _load("scale_calibration")
+    with pytest.raises(ValueError):
+        sc.scaled({"light": {"intensity": 1.0}}, scale, "s")
+
+
+def test_scaled_calibration_needs_a_fit_result():
+    sc = _load("scale_calibration")
+    with pytest.raises(KeyError):
+        sc.scaled({"light": {}}, 1.0, "s")
