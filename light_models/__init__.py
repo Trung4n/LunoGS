@@ -55,6 +55,10 @@ def build_shader(config, params_data=None):
         return load_params_file(params_file_path(config))
 
     shader = make_shader(config["Light"], load_params)
+    if read_profile_bootstrap(config["Light"]) is not None:
+        from light_models.profile_bootstrap import check_shader_supports_bootstrap
+
+        check_shader_supports_bootstrap(shader)
     if shader.requires_sensor_depth:
         # A component reads the observed frame's sensor depth (e.g. normal
         # source sensor_depth_fd, D49). In monocular, Camera.depth is still
@@ -67,6 +71,40 @@ def build_shader(config, params_data=None):
                 "sensor_depth_fd), which needs Dataset.sensor_type depth, got monocular"
             )
     return shader
+
+
+_PROFILE_BOOTSTRAP_KEYS = ("sat_8bit", "min_cos_nl", "bin_deg", "min_pixels_per_bin", "grid_deg", "min_ramp_deg", "min_contrast")
+
+
+def read_profile_bootstrap(light_cfg):
+    """Light.profile_bootstrap as a namespace, or None when absent. Every key
+    is required and nothing else is allowed."""
+    block = light_cfg.get("profile_bootstrap")
+    if block is None:
+        return None
+    where = "Light.profile_bootstrap"
+    if not isinstance(block, dict):
+        raise TypeError(f"{where} must be a block, got {block!r}")
+    extra = set(block) - set(_PROFILE_BOOTSTRAP_KEYS)
+    if extra:
+        raise ValueError(f"{where}: unexpected keys {sorted(extra)}")
+    missing = set(_PROFILE_BOOTSTRAP_KEYS) - set(block)
+    if missing:
+        raise KeyError(f"{where}: missing keys {sorted(missing)}")
+    number = lambda v: not isinstance(v, bool) and isinstance(v, (int, float))  # noqa: E731
+    checks = {
+        "sat_8bit": lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 255,
+        "min_cos_nl": lambda v: number(v) and 0 < v < 1,
+        "bin_deg": lambda v: number(v) and v > 0,
+        "min_pixels_per_bin": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 1,
+        "grid_deg": lambda v: number(v) and v > 0,
+        "min_ramp_deg": lambda v: number(v) and v > 0,
+        "min_contrast": lambda v: number(v) and v > 1,
+    }
+    for key, ok in checks.items():
+        if not ok(block[key]):
+            raise ValueError(f"{where}.{key}: invalid value {block[key]!r}")
+    return SimpleNamespace(**block)
 
 
 # Strategies for the albedo of newly created Gaussians (docs/DECISIONS.md D7).

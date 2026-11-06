@@ -1,0 +1,17 @@
+# Self-calibration knowing NOTHING about the lamp (docs/DECISIONS.md D112):
+# rgbd_lambert_selfcal_1deg.yaml with the spline restarted, before the map
+# exists, from a coarse cone estimated on the FIRST frame (image + sensor
+# depth, light_models/profile_bootstrap.py), instead of a flat start or the
+# hand guess of rgbd_lambert_selfcal_cone_guess.yaml. All values of this block
+# are settings of the estimate, none is a measurement of the lamp.
+inherit_from: "configs/light/rgbd_lambert_selfcal_1deg.yaml"
+
+Light:
+  profile_bootstrap:
+    sat_8bit: 250            # as LightTracking.saturation_mask
+    min_cos_nl: 0.3          # as LightTracking.pixel_weight.min_cos_nl
+    bin_deg: 1.0             # as the spline knots
+    min_pixels_per_bin: 50
+    grid_deg: 0.5
+    min_ramp_deg: 2.0
+    min_contrast: 2.0        # core / outside of the cone; below: error, no edge to fit

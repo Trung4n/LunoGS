@@ -7,7 +7,8 @@ from tqdm import tqdm
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.scene.gaussian_model import GaussianModel
-from light_models import read_albedo_lr
+from light_models import read_albedo_lr, read_profile_bootstrap
+from light_models.profile_bootstrap import bootstrap_spline
 from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
@@ -93,6 +94,7 @@ class BackEnd(mp.Process):
         # Light.albedo_lr (D97), read here so a bad block fails before the
         # run starts. None for original MonoGS (feature_lr as configured).
         self.albedo_lr = read_albedo_lr(self.config) if self.shader is not None else None
+        self.profile_bootstrap = read_profile_bootstrap(self.config["Light"]) if self.shader is not None else None
 
         # --- initial map (initialize_map), single frame ---
         # number of iterations
@@ -207,6 +209,17 @@ class BackEnd(mp.Process):
                 group["lr"] = lr / 20.0
         Log(f"albedo learning rate {lr:.3g} = {self.albedo_lr.relative_lr:.3g} x initial mean albedo "
             f"{scale:.4f} (frame {frame_idx})", tag="Light")
+
+    def bootstrap_light_profile(self, frame_idx, viewpoint):
+        # Light.profile_bootstrap: restarts the spline from a coarse cone
+        # estimated on this frame (docs/DECISIONS.md D112), before the first
+        # Gaussians get their albedo from the shader. The frontend receives the
+        # new values with the "init" answer (push_to_frontend).
+        if self.profile_bootstrap is None:
+            return
+        fit = bootstrap_spline(self.shader, viewpoint, self.profile_bootstrap)
+        Log(f"emission profile estimated on frame {frame_idx}: theta_in {fit.theta_in:g} deg, "
+            f"theta_out {fit.theta_out:g} deg, core / outside {fit.level_core / fit.level_out:.1f}", tag="Light")
 
     def start_light_learning(self):
         # Learnable light parameters (light_models/learning.py, D60): this
@@ -725,6 +738,7 @@ class BackEnd(mp.Process):
                     self.reset()
 
                     self.viewpoints[cur_frame_idx] = viewpoint
+                    self.bootstrap_light_profile(cur_frame_idx, viewpoint)
                     self.add_next_kf(
                         cur_frame_idx, viewpoint, depth_map=depth_map, init=True
                     )

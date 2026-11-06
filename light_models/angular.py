@@ -140,6 +140,20 @@ class Spline:
         self.smoothness_weight = float(w)
         self._learn = dict(learn)
 
+    def restart_from(self, profile):
+        """Sets the knot values from a callable profile(cos_theta), sampled at
+        the knots and divided by its value at theta = 0, with the checks of
+        `init`; the tensor object is kept (the optimizer holds it). Used by
+        the first-frame estimate (light_models/profile_bootstrap.py, D112)."""
+        with torch.no_grad():
+            v = profile(self.cos_knots.to(torch.float64)).to(torch.float64)
+        if not float(v[0]) > 0:
+            raise ValueError(f"Light.angular: profile must be > 0 at theta = 0, got {float(v[0])!r}")
+        v = (v / v[0]).tolist()
+        if any(b > a for a, b in zip(v, v[1:])) or min(v) < 0:
+            raise ValueError(f"Light.angular: profile must be non-increasing and >= 0 at the knots, got {v!r}")
+        self.knot_values.data.copy_(torch.tensor(v[1:], dtype=self.knot_values.dtype))
+
     # ---- learning hooks (light_models/learning.py, colocated.py) ----
 
     def learnable_extra(self, prefix):
