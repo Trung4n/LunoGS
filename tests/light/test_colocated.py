@@ -203,7 +203,7 @@ def test_shader_pickles():
     "light_patch, err",
     [
         ({"falloff": {"type": "learned"}}, NotImplementedError),
-        ({"angular": {"type": "smoothstep"}}, NotImplementedError),
+        ({"angular": {"type": "mlp"}}, NotImplementedError),
         ({"angular": {"type": "cone"}}, ValueError),
         ({"cosine": {"type": "lambert", "warmup_keyframes": 0}}, KeyError),  # normal_source missing
         ({"cosine": {"type": "lambert", "normal_source": {"type": "gbuffer"}}}, KeyError),  # warmup missing

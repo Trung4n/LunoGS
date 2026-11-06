@@ -232,6 +232,8 @@ def test_light_config_set():
         "rgbd_lambert_selfcal_tcl_zero.yaml",
         "rgbd_lambert_selfcal_tcl_xy.yaml",
         "rgbd_lambert_selfcal_tcl_fixed0.yaml",
+        "rgbd_lambert_selfcal_1deg.yaml",
+        "rgbd_lambert_selfcal_cone_guess.yaml",
         "rgbd_nocos_depth_noise.yaml",
         "rgbd_nocos_depth_noise_heavy.yaml",
         "verify_shading.yaml",

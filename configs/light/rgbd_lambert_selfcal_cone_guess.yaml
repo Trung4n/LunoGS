@@ -1,0 +1,16 @@
+# Self-calibration from a COARSE CONE instead of a flat profile (docs/DECISIONS.md
+# D110): rgbd_lambert_selfcal_1deg.yaml with the spline started from a generic
+# soft spot, a hand guess written here: nothing is read from a params file or
+# from the pre-calibration. The self-calibration loses most of its ATE in the
+# first 250 frames (D109), mapped while the profile is still flat.
+# Caveat: 20-40 deg brackets the true edge of the data (24-30 deg), and it was
+# chosen knowing it; an off-centre guess is the check if this start helps.
+inherit_from: "configs/light/rgbd_lambert_selfcal_1deg.yaml"
+
+Light:
+  angular:
+    init:
+      _replace: true
+      type: smoothstep
+      theta_in: {source: value, value: 20.0, learnable: false}
+      theta_out: {source: value, value: 40.0, learnable: false}

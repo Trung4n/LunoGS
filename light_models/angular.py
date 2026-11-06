@@ -228,6 +228,40 @@ class Tabulated:
         return _linear_in_cos(self.cos_knots, self.values, cos_theta)
 
 
-# smoothstep: generic profile in THETA with theta_in / theta_out (CLAUDE.md
-# section 4.2); mlp: not planned for this work (explicit models only, D65).
-declare_planned("angular", "smoothstep", "mlp")
+@register("angular", "smoothstep", numeric=("theta_in", "theta_out"))
+class Smoothstep:
+    """Generic spot profile IN THE ANGLE (CLAUDE.md section 4.2), for lamps
+    whose profile has no known formula: Phi = 1 up to theta_in, 0 from
+    theta_out on, S((theta_out - theta) / (theta_out - theta_in)) between,
+    S(x) = x^2 (3 - 2x). Not blender_spot, which is smooth in cos(theta) and
+    specific to that renderer (D14)."""
+
+    def __init__(self, theta_in, theta_out):
+        a, b = theta_in.value, theta_out.value
+        for spec in (theta_in, theta_out):
+            if isinstance(spec.value, bool) or not isinstance(spec.value, (int, float)):
+                raise ValueError(f"{spec.name} must be a number, got {spec.value!r}")
+        if not 0 <= a < b < 90:
+            raise ValueError(f"Light.angular needs 0 <= theta_in < theta_out < 90, got {a!r}, {b!r}")
+        self.theta_in = theta_in.tensor()
+        self.theta_out = theta_out.tensor()
+
+    def check_values(self):
+        a, b = float(self.theta_in.detach()), float(self.theta_out.detach())
+        if not 0 <= a < b < 90:
+            raise ValueError(f"Light.angular left 0 <= theta_in < theta_out < 90: {a!r}, {b!r}")
+
+    def __call__(self, cos_theta):
+        a = self.theta_in.to(cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
+        b = self.theta_out.to(cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
+        # acos only strictly inside the ramp: its derivative is infinite on
+        # the light axis, where Phi is constant anyway.
+        ramp = (cos_theta < torch.cos(a)) & (cos_theta > torch.cos(b))
+        safe = torch.where(ramp, cos_theta, torch.cos((a + b) / 2.0))
+        x = (b - torch.acos(safe)) / (b - a)
+        s = x * x * (3.0 - 2.0 * x)
+        return torch.where(ramp, s, (cos_theta >= torch.cos(a)).to(cos_theta.dtype))
+
+
+# mlp: not planned for this work (explicit models only, D65).
+declare_planned("angular", "mlp")
