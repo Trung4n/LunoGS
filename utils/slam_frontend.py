@@ -10,7 +10,7 @@ from gui import gui_utils
 from utils.camera_utils import Camera, build_projection_matrix
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
-from utils.multiprocessing_utils import clone_obj
+from utils.multiprocessing_utils import clone_obj, raise_if_dead
 from utils.pose_utils import update_pose
 from utils.run_recorder import open_recorder
 from light_models.diagnostics import log_pixel_usage, log_timing
@@ -50,6 +50,9 @@ class FrontEnd(mp.Process):
         self.backend_queue = None  # frontend -> backend requests (init/keyframe/...)
         self.q_main2vis = None  # frontend -> GUI packets
         self.q_vis2main = None  # GUI -> frontend (pause/unpause)
+        # The backend's process, set by slam.py once started; None = no check
+        # (tests, or before the start). See raise_if_dead (D117).
+        self.backend_process = None
 
         # initialized: True once the system has a usable map and tracking can
         # run normally. RGB-D is initialized right after the first frame;
@@ -534,6 +537,8 @@ class FrontEnd(mp.Process):
         toc = torch.cuda.Event(enable_timing=True)
 
         while True:
+            # A dead backend never answers: stop instead of waiting forever (D117).
+            raise_if_dead(self.backend_process, "backend")
             # a) GUI pause handling. While paused this busy-waits (no sleep).
             if self.q_vis2main.empty():
                 if self.pause:

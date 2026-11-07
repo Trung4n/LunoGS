@@ -46,6 +46,15 @@ def drain_queue(q, tolerate=()):
 TERMINATE_GRACE_S = 10
 
 
+def raise_if_dead(p, name):
+    """Raises if process `p` was started and has ended. The frontend waits for
+    the backend's answers in a loop; if the backend dies (e.g. CUDA out of
+    memory), nothing would ever answer and the run would hang until the
+    session limit (D117). None = not started yet, nothing to check."""
+    if p is not None and p.exitcode is not None:
+        raise RuntimeError(f"{name} process ended unexpectedly (exit code {p.exitcode})")
+
+
 def stop_process(p):
     """Ends process `p` if it is still alive: terminate (SIGTERM), then kill
     (SIGKILL) if it ignores that. Returns True if it had to be stopped."""

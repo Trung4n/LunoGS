@@ -237,6 +237,9 @@ class SLAM:
             time.sleep(5)  # give the GUI window/OpenGL context time to initialize
 
         backend_process.start()
+        # Checked by the frontend at every iteration: a backend that dies
+        # (e.g. CUDA out of memory) must end the run, not hang it (D117).
+        self.frontend.backend_process = backend_process
         # Blocking call: drives the whole tracking loop over the dataset in this
         # (main) process until every frame has been consumed.
         self.frontend.run()
