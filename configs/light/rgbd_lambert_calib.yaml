@@ -9,7 +9,9 @@
 #     mapping from a guess, as DarkGS re-optimises its ambient per scene.
 #     The guess is not a measurement of either room (office0 0.12, room0
 #     0.06 in the data); started after 10 keyframes like rgbd_nocos_learn_all
-#     (D65); at_bound project as the self-calibration (D70).
+#     (D65); at_bound project as the self-calibration (D70). lr 1e-3, not
+#     1e-4: with 1e-4 a guess 10 times off took half the sequence to learn
+#     and the first keyframes were built with the wrong c (D120).
 # K is in the units of the calibration target's nominal albedo
 # (Calibration.target_albedo), so the albedo scale of the map, and the
 # absolute colour learning rate of the main model, stay as before.
@@ -28,7 +30,7 @@ Light:
     values: {source: params_file, key: light.angular.knot_values, learnable: false}
     interpolation: linear_cos
   ambient:
-    c: {_replace: true, source: value, value: 0.05, learnable: true, lr: 0.0001, prior_weight: 0.0,
+    c: {_replace: true, source: value, value: 0.05, learnable: true, lr: 0.001, prior_weight: 0.0,
         at_bound: project}
   schedule:
     - {after_keyframes: 10, unfreeze: [ambient.c]}

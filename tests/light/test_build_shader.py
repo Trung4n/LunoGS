@@ -229,7 +229,6 @@ def test_light_config_set():
         "rgbd_lambert_calib.yaml",
         "rgbd_lambert_calib_learn.yaml",
         "rgbd_lambert_calib_keep_dark.yaml",
-        "rgbd_lambert_calib_c_fast.yaml",
         "rgbd_lambert_selfcal_tcl_ruler.yaml",
         "rgbd_lambert_selfcal_tcl_zero.yaml",
         "rgbd_lambert_selfcal_tcl_xy.yaml",
