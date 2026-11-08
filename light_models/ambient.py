@@ -85,5 +85,84 @@ class AdditiveConst:
         return albedo * _direct3(direct) + c
 
 
-# Per-Gaussian / SH ambient need an L1 penalty towards 0 (CLAUDE.md 4.3).
-declare_planned("ambient", "per_gaussian", "sh")
+@register("ambient", "per_gaussian", numeric=("c",),
+          options=("channels", "residual_lr", "residual_after_keyframes", "l1_weight"))
+class PerGaussian(MultiplicativeConst):
+    """Ambient light that varies over the scene (docs/DECISIONS.md D121):
+    the irradiance of the static room lights at Gaussian i is E_i = c + r_i,
+    a global level c (a ParamSpec, learned as for multiplicative_const) plus
+    a per-Gaussian residual r_i stored in the map (GaussianModel extra
+    "ambient_residual", `channels` = 1 or 3 values per Gaussian, optimized
+    by the mapping Adam with `residual_lr`). For diffuse surfaces E does not
+    depend on the camera, so it is a property of the surface, like the
+    albedo. The residual is rasterized in a second pass with the colours
+    A_i * (max(c + r_i, 0) - c), so that the radiance is
+        I = A * (direct + c) + M,   M = rasterized A_i * (E_i - c),
+    exactly sum_i w_i A_i (direct + E_i) where one Gaussian dominates a pixel.
+    E_i >= 0 is the definition of the domain: the clamp keeps the shading
+    physical; a residual clamped there gets no data gradient and the
+    penalty below pulls it back.
+
+    The residual is off (M = 0, no second pass) until the map has MORE than
+    `residual_after_keyframes` keyframes, so c settles first. Mapping adds
+    l1_weight * mean |M| per rendered keyframe (CLAUDE.md 4.3: without it
+    the albedo goes to 0 and the colour moves into the ambient term, i.e.
+    radiance is baked again). The penalty is on the rasterized M, in the
+    units of the photometric loss, so l1_weight compares to Training.alpha
+    whatever the albedo scale of the scene."""
+
+    EXTRA = "ambient_residual"
+
+    def __init__(self, c, channels, residual_lr, residual_after_keyframes, l1_weight):
+        super().__init__(c)
+        if channels not in (1, 3) or isinstance(channels, bool):
+            raise ValueError(f"Light.ambient.channels must be 1 or 3, got {channels!r}")
+        for name, v in (("residual_lr", residual_lr), ("l1_weight", l1_weight)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+                raise ValueError(f"Light.ambient.{name} must be a positive number, got {v!r}")
+        n = residual_after_keyframes
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError(f"Light.ambient.residual_after_keyframes must be an integer >= 0, got {n!r}")
+        self.channels = channels
+        self.residual_lr = float(residual_lr)
+        self.residual_after_keyframes = n
+        self.l1_weight = float(l1_weight)
+        # Runtime state, overwritten before every SLAM step (as Lambert's
+        # warm-up, D43); None until then (verification scripts, GUI) = the
+        # full model, residual on.
+        self._n_keyframes = None
+
+    def set_keyframe_count(self, n):
+        self._n_keyframes = n
+
+    def residual_active(self):
+        return self._n_keyframes is None or self._n_keyframes > self.residual_after_keyframes
+
+    def per_gaussian_params(self):
+        """{extra name: (values per Gaussian, Adam learning rate)}; new
+        Gaussians start at 0, i.e. at the global level c."""
+        return {self.EXTRA: (self.channels, self.residual_lr)}
+
+    def extra_raster_keys(self):
+        return (self.EXTRA,) if self.residual_active() else ()
+
+    def extra_rasters(self, gaussians):
+        """{gbuffer key: (N,3) colours to rasterize}, empty while off."""
+        if not self.residual_active():
+            return {}
+        r = gaussians.get_extra(self.EXTRA)
+        albedo = gaussians.get_albedo
+        c = self.c.to(albedo.device, albedo.dtype).view(1, -1)
+        excess = (c + r).clamp_min(0.0) - c
+        return {self.EXTRA: albedo * excess}
+
+    def __call__(self, albedo, direct, gbuffer):
+        radiance = super().__call__(albedo, direct)
+        if not self.residual_active():
+            return radiance, {}
+        m = gbuffer[self.EXTRA]
+        return radiance + m, {"ambient_residual": m,
+                              "map_penalty": self.l1_weight * m.abs().mean()}
+
+
+declare_planned("ambient", "sh")

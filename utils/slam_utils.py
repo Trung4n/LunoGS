@@ -366,8 +366,15 @@ def get_loss_mapping(config, render_pkg, viewpoint, initialization=False):
     depth = render_pkg["depth"]
     weight = get_loss_weight(config, render_pkg, viewpoint, "mapping")
     if config["Training"]["monocular"]:
-        return get_loss_mapping_rgb(config, image, gt_image, depth, viewpoint, weight)
-    return get_loss_mapping_rgbd(config, image, gt_image, depth, viewpoint, weight)
+        loss = get_loss_mapping_rgb(config, image, gt_image, depth, viewpoint, weight)
+    else:
+        loss = get_loss_mapping_rgbd(config, image, gt_image, depth, viewpoint, weight)
+    # Regularizer of a per-Gaussian light quantity (the L1 on the ambient
+    # residual, D121), present only when the light model renders one: mapping
+    # only, never tracking or the offline refinement.
+    if "light_map_penalty" in render_pkg:
+        loss = loss + render_pkg["light_map_penalty"]
+    return loss
 
 
 def get_loss_mapping_rgb(config, image, gt_image, depth, viewpoint, pixel_weight):

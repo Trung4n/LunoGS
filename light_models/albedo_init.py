@@ -69,6 +69,11 @@ def shading_at_depth(shader, depth, viewpoint):
         # OpenCV pixel centers), not like a rasterized map (D29).
         "pixel_offset": 0.0,
     }
+    # Per-Gaussian light maps (D121): the de-shaded albedo is that of NEW
+    # Gaussians, whose per-Gaussian values start at 0 (the global level c
+    # for the ambient residual), so their maps are exactly zero here.
+    for key in shader.extra_raster_keys():
+        gbuffer[key] = torch.zeros(3, h, w, device=depth.device, dtype=depth.dtype)
     return shader(gbuffer, viewpoint)["radiance_linear"]
 
 

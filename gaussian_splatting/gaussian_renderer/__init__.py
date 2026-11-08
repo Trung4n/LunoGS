@@ -275,6 +275,28 @@ def render(
             # Rasterized pixel i looks along OpenCV ray i + 0.5 (D29).
             "pixel_offset": RASTERIZER_PIXEL_OFFSET,
         }
+        # Per-Gaussian light quantities (e.g. the ambient residual, D121):
+        # one more pass of the same rasterizer per map, with precomputed
+        # colours instead of the SH, so gradients reach those per-Gaussian
+        # values, the Gaussians' geometry and the pose as for the albedo.
+        extra_rasters = shader.extra_rasters(pc)
+        if mask is not None and extra_rasters:
+            raise NotImplementedError("extra light rasters with a Gaussian mask")
+        for key, colors in extra_rasters.items():
+            if key in gbuffer:
+                raise ValueError(f"extra raster {key!r} clashes with the G-buffer")
+            gbuffer[key] = rasterizer(
+                means3D=means3D,
+                means2D=means2D,
+                shs=None,
+                colors_precomp=colors,
+                opacities=pc.get_opacity,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=cov3D_precomp,
+                theta=viewpoint_camera.cam_rot_delta,
+                rho=viewpoint_camera.cam_trans_delta,
+            )[0]
         shaded = shader(gbuffer, viewpoint_camera)
         radiance_linear = shaded["radiance_linear"]
         if radiance_linear.shape != rendered_image.shape:

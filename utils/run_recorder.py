@@ -179,8 +179,12 @@ class RunRecorder:
         def arr(t, dtype):
             return t.detach().float().cpu().numpy().astype(dtype)
 
+        # Per-Gaussian light values (D121), e.g. extra_ambient_residual; maps
+        # of original MonoGS (and the light-free test doubles) have none.
+        extras = {f"extra_{name}": arr(t, np.float16) for name, t in getattr(gaussians, "_extras", {}).items()}
         np.savez_compressed(
             os.path.join(self.root, "maps", tag + ".npz"),
+            **extras,
             frame_idx=np.int64(frame_idx),
             n_keyframes=np.int64(n_keyframes),
             xyz=arr(gaussians.get_xyz, np.float32),

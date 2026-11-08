@@ -81,6 +81,9 @@ class ColocatedShader:
         self.ambient = build_component(
             "ambient", require_key(light_cfg, "ambient", where), "Light.ambient", params_data
         )
+        # Ambient forms with per-Gaussian values read rasterized maps from
+        # the G-buffer and return auxiliary outputs (D121).
+        self._ambient_maps = hasattr(self.ambient, "extra_rasters")
 
         gb = require_key(light_cfg, "gbuffer", where)
         thr = require_key(gb, "opacity_thr", "Light.gbuffer")
@@ -172,8 +175,27 @@ class ColocatedShader:
 
     def set_keyframe_count(self, n):
         # Keyframes currently in the map, reported by FrontEnd / BackEnd
-        # before each step; only components with a warm-up use it (D43).
+        # before each step; only components with a warm-up use it (D43, and
+        # the per-Gaussian ambient residual, D121).
         self.cosine.set_keyframe_count(n)
+        if self._ambient_maps:
+            self.ambient.set_keyframe_count(n)
+
+    # ---- per-Gaussian light parameters stored in the map (D121) ----
+
+    def per_gaussian_params(self):
+        """{name: (values per Gaussian, lr)} the GaussianModel must hold
+        (GaussianModel.declare_extras), empty for the global forms."""
+        return self.ambient.per_gaussian_params() if self._ambient_maps else {}
+
+    def extra_raster_keys(self):
+        """G-buffer keys the shader reads besides albedo, depth, opacity."""
+        return self.ambient.extra_raster_keys() if self._ambient_maps else ()
+
+    def extra_rasters(self, gaussians):
+        """{gbuffer key: (N,3) per-Gaussian colours} that render() rasterizes
+        in extra passes before calling the shader."""
+        return self.ambient.extra_rasters(gaussians) if self._ambient_maps else {}
 
     def __call__(self, gbuffer, viewpoint_camera):
         albedo = gbuffer["albedo"]
@@ -197,7 +219,10 @@ class ColocatedShader:
         cos_term, aux = self.cosine(points, valid, to_light, gbuffer, viewpoint_camera)
         k = self.intensity.to(dev, dt)
         direct = k * (phi * fall * cos_term)
-        radiance = self.ambient(albedo, direct)
+        if self._ambient_maps:
+            radiance, amb = self.ambient(albedo, direct, gbuffer)
+        else:
+            radiance, amb = self.ambient(albedo, direct), {}
 
         out = {
             "radiance_linear": radiance,
@@ -206,4 +231,10 @@ class ColocatedShader:
         }
         for name, value in aux.items():
             out["light_" + name] = value[None]
+        if "ambient_residual" in amb:
+            out["light_ambient_residual"] = amb["ambient_residual"]  # (3,H,W)
+        if "map_penalty" in amb:
+            # Scalar regularizer added by get_loss_mapping only (never in
+            # tracking or the offline refinement).
+            out["light_map_penalty"] = amb["map_penalty"]
         return out

@@ -51,6 +51,16 @@ class IdentityShader:
     def set_keyframe_count(self, n):
         pass
 
+    # No per-Gaussian light parameter (D121).
+    def per_gaussian_params(self):
+        return {}
+
+    def extra_raster_keys(self):
+        return ()
+
+    def extra_rasters(self, gaussians):
+        return {}
+
 
 def _make_identity(light_cfg, load_params):
     if "schedule" in light_cfg:

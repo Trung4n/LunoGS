@@ -176,6 +176,15 @@ class MapRenderer:
         # The recorded colour is get_albedo = max(SH2RGB(dc), 0): back to dc.
         m._features_dc = RGB2SH(f(snap["color"]))[:, None, :]
         m._features_rest = torch.zeros(m._xyz.shape[0], 0, 3, device="cuda")
+        # Per-Gaussian light values of the run (D121), e.g. the ambient residual.
+        m._extras = {k[len("extra_"):]: f(v) for k, v in snap.items() if k.startswith("extra_")}
+        if shader is not None and set(m._extras) != set(shader.per_gaussian_params()):
+            raise SystemExit(f"the map carries {sorted(m._extras)}, the config's light model "
+                             f"{sorted(shader.per_gaussian_params())}")
+        if shader is not None:
+            # Keyframe-gated parts of the light model (D43, D121) as at the
+            # end of the run that saved this map.
+            shader.set_keyframe_count(int(snap["n_keyframes"]))
         self.model = m
 
     def _camera(self, c2w, sensor_depth):

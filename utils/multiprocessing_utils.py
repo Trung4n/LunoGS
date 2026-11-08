@@ -76,6 +76,12 @@ def clone_obj(obj):
             getattr(clone_obj.__class__, attr), property
         ):
             continue
-        if isinstance(getattr(clone_obj, attr), torch.Tensor):
-            setattr(clone_obj, attr, getattr(clone_obj, attr).detach().clone())
+        value = getattr(clone_obj, attr)
+        if isinstance(value, torch.Tensor):
+            setattr(clone_obj, attr, value.detach().clone())
+        elif isinstance(value, dict) and value and all(isinstance(v, torch.Tensor) for v in value.values()):
+            # e.g. GaussianModel._extras (per-Gaussian light values, D121):
+            # detached like the tensor attributes, so they can be sent to
+            # another process.
+            setattr(clone_obj, attr, {k: v.detach().clone() for k, v in value.items()})
     return clone_obj

@@ -110,6 +110,10 @@ class SLAM:
             # whole sequence, as in original MonoGS.
             self.dataset.num_imgs = min(self.dataset.num_imgs, config["Dataset"]["max_frames"])
 
+        if self.shader is not None:
+            # Per-Gaussian light values the map must carry (D121); none for
+            # the global light forms.
+            self.gaussians.declare_extras(self.shader.per_gaussian_params())
         self.gaussians.training_setup(opt_params)
         # Rasterizer background color, read strictly from the config (no
         # default, see docs/DECISIONS.md D9). Baseline configs set [0, 0, 0].

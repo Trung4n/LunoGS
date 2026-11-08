@@ -97,6 +97,14 @@ class GaussianModel:
         # recomputed by the backend right before pruning.
         self.n_obs = torch.empty(0).int()
 
+        # Extra per-Gaussian parameters declared by the light model
+        # (declare_extras, docs/DECISIONS.md D121), e.g. the ambient residual:
+        # name -> (N,k) tensor, one Adam group each, carried through every
+        # append / clone / split / prune like the attributes above. Empty
+        # without a light model that needs them (original MonoGS).
+        self._extras = {}
+        self._extra_lr = {}
+
         # Adam over the six parameter tensors (created in training_setup).
         self.optimizer = None
 
@@ -160,6 +168,32 @@ class GaussianModel:
         # model this is the LINEAR albedo (docs/DECISIONS.md D1), deliberately
         # not clamped above 1.
         return torch.clamp_min(SH2RGB(self._features_dc[:, 0, :]), 0.0)
+
+    def get_extra(self, name):
+        if name not in self._extras:
+            raise KeyError(f"per-Gaussian parameter {name!r} was not declared (declare_extras)")
+        return self._extras[name]
+
+    def declare_extras(self, specs):
+        """specs: {name: (values per Gaussian, Adam lr)} from
+        shader.per_gaussian_params(). Called once, on the empty map, before
+        training_setup."""
+        if self.optimizer is not None or self.get_xyz.shape[0] != 0:
+            raise RuntimeError("declare_extras must be called on the empty map, before training_setup")
+        for name, (k, lr) in specs.items():
+            self._extras[name] = torch.empty(0, k, device="cuda")
+            self._extra_lr[name] = lr
+
+    def _new_extras(self, n):
+        # New Gaussians from a keyframe: every extra starts at 0 (D121).
+        return {name: torch.zeros(n, t.shape[1], device="cuda") for name, t in self._extras.items()}
+
+    def _select_extras(self, mask, repeat=1):
+        return {name: t[mask].repeat(repeat, 1) for name, t in self._extras.items()}
+
+    def _take_extras(self, optimizable_tensors):
+        for name in self._extras:
+            self._extras[name] = optimizable_tensors[name]
 
     @property
     def get_opacity(self):
@@ -370,6 +404,7 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_unique_kfIDs,
             new_n_obs=new_n_obs,
+            new_extras=self._new_extras(new_xyz.shape[0]),
         )
 
     def extend_from_pcd_seq(
@@ -434,6 +469,8 @@ class GaussianModel:
                 "name": "rotation",
             },
         ]
+        for name, t in self._extras.items():
+            l.append({"params": [t], "lr": self._extra_lr[name], "name": name})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         # Not used: update_learning_rate calls `helper` directly with the
@@ -704,6 +741,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        self._take_extras(optimizable_tensors)
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -758,6 +796,7 @@ class GaussianModel:
         new_rotation,
         new_kf_ids=None,
         new_n_obs=None,
+        new_extras=None,
     ):
         # Common "append Gaussians" step, used by keyframe insertion
         # (extend_from_pcd), cloning and splitting.
@@ -769,6 +808,10 @@ class GaussianModel:
             "scaling": new_scaling,
             "rotation": new_rotation,
         }
+        new_extras = new_extras or {}
+        if set(new_extras) != set(self._extras):
+            raise ValueError(f"new Gaussians carry extras {sorted(new_extras)}, the map has {sorted(self._extras)}")
+        d.update(new_extras)
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -777,6 +820,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        self._take_extras(optimizable_tensors)
 
         # Resets the densification stats of ALL Gaussians, not just the new
         # ones (as in 3DGS). In MonoGS this also happens every time a keyframe
@@ -836,6 +880,7 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
+            new_extras=self._select_extras(selected_pts_mask, N),
         )
 
         # Delete the split originals (the appended children are kept).
@@ -881,6 +926,7 @@ class GaussianModel:
             new_rotation,
             new_kf_ids=new_kf_id,
             new_n_obs=new_n_obs,
+            new_extras=self._select_extras(selected_pts_mask),
         )
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
