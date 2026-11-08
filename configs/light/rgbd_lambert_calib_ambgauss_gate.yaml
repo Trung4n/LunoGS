@@ -1,0 +1,10 @@
+# Ablation of rgbd_lambert_calib_ambgauss.yaml (docs/DECISIONS.md D124): the
+# per-Gaussian residual learns only on pixels with direct <= residual_direct_max.
+# Measured on the lit run of the main model: outside the cone a pixel asks E to
+# change by 3% of c, above direct 0.02 by 25% or more, above 4 by 120%.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgauss.yaml"
+
+Light:
+  ambient:
+    type: per_gaussian_gated
+    residual_direct_max: 0.02

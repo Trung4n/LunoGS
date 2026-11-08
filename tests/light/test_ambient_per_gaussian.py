@@ -132,6 +132,65 @@ def test_shading_and_penalty():
     assert aux == {}
 
 
+def _gated(**over):
+    block = {"type": "per_gaussian_gated", "c": {"source": "value", "value": 0.1, "learnable": False},
+             "residual_direct_max": 0.5}
+    block.update(AMB)
+    block.update(over)
+    return build_shader(_config(block), PARAMS)
+
+
+def test_gate_threshold_is_required():
+    block = {"type": "per_gaussian_gated", "c": {"source": "value", "value": 0.1, "learnable": False}}
+    block.update(AMB)
+    with pytest.raises(KeyError, match="residual_direct_max"):
+        build_shader(_config(block), PARAMS)
+
+
+@pytest.mark.parametrize("bad", [-0.1, True, "0.5"])
+def test_bad_gate_threshold_raises(bad):
+    with pytest.raises(ValueError, match="residual_direct_max"):
+        _gated(residual_direct_max=bad)
+
+
+def test_gate_keeps_the_image_and_cuts_gradient_and_penalty_under_the_lamp():
+    shader = _gated()
+    albedo = torch.full((3, 1, 3), 0.5)
+    direct = torch.tensor([[0.0, 0.5, 2.0]])  # the threshold itself is still free
+    m = torch.tensor(0.2).repeat(3, 1, 3).requires_grad_()
+    radiance, aux = shader.ambient(albedo, direct, {"ambient_residual": m})
+    torch.testing.assert_close(radiance.detach(), albedo * (direct[None] + 0.1) + m.detach())
+    torch.testing.assert_close(aux["ambient_residual"], m)
+    radiance.sum().backward()
+    assert m.grad[:, 0, :2].eq(1).all() and m.grad[:, 0, 2].eq(0).all()
+    m.grad = None
+    aux["map_penalty"].backward()
+    expected = 0.05 / 9  # mean over all 9 values, of which 6 count
+    assert m.grad[:, 0, :2].sub(expected).abs().max() < 1e-7 and m.grad[:, 0, 2].eq(0).all()
+
+
+def test_gate_above_every_direct_matches_per_gaussian():
+    albedo = torch.rand(3, 2, 3)
+    direct = torch.rand(2, 3)
+    m = torch.randn(3, 2, 3) * 0.1
+    gated = _gated(residual_direct_max=10.0).ambient(albedo, direct, {"ambient_residual": m})
+    plain = _per_gaussian().ambient(albedo, direct, {"ambient_residual": m})
+    torch.testing.assert_close(gated[0], plain[0])
+    torch.testing.assert_close(gated[1]["map_penalty"], plain[1]["map_penalty"])
+
+
+def test_gate_uses_the_strongest_channel_and_stays_off_until_the_residual_opens():
+    shader = _gated()
+    direct = torch.zeros(3, 1, 1)
+    direct[1] = 2.0
+    m = torch.tensor(0.2).repeat(3, 1, 1).requires_grad_()
+    radiance, _ = shader.ambient(torch.full((3, 1, 1), 0.5), direct, {"ambient_residual": m})
+    radiance.sum().backward()
+    assert m.grad.eq(0).all()
+    shader.set_keyframe_count(0)
+    assert shader.ambient(torch.ones(3, 1, 1), torch.zeros(1, 1), {})[1] == {}
+
+
 def test_mapping_loss_adds_the_penalty_only_when_rendered(monkeypatch):
     from utils import slam_utils
 

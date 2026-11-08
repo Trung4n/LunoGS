@@ -165,4 +165,36 @@ class PerGaussian(MultiplicativeConst):
                               "map_penalty": self.l1_weight * m.abs().mean()}
 
 
+@register("ambient", "per_gaussian_gated", numeric=("c",),
+          options=("channels", "residual_lr", "residual_after_keyframes", "l1_weight", "residual_direct_max"))
+class PerGaussianGated(PerGaussian):
+    """per_gaussian whose residual learns only where the lamp is weak
+    (docs/DECISIONS.md D124). With an L1 loss every pixel votes on r_i with the
+    sign of its residual. Under the lamp that residual is mostly the error of
+    the direct term (normals, profile), much larger than any ambient signal,
+    while r_i barely changes the image there; the wrong E then shows outside
+    the cone and the albedo pays for it. So on pixels with direct above
+    `residual_direct_max`, M still shades the image but gives no gradient and
+    no penalty. The penalty keeps the mean over all pixels, as the photometric
+    loss, so l1_weight means the same as in per_gaussian."""
+
+    def __init__(self, c, channels, residual_lr, residual_after_keyframes, l1_weight, residual_direct_max):
+        super().__init__(c, channels, residual_lr, residual_after_keyframes, l1_weight)
+        v = residual_direct_max
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise ValueError(f"Light.ambient.residual_direct_max must be a number >= 0, got {v!r}")
+        self.residual_direct_max = float(v)
+
+    def __call__(self, albedo, direct, gbuffer):
+        radiance = MultiplicativeConst.__call__(self, albedo, direct)
+        if not self.residual_active():
+            return radiance, {}
+        m = gbuffer[self.EXTRA]
+        free = _direct3(direct).amax(0, keepdim=True) <= self.residual_direct_max
+        return radiance + m.where(free, m.detach()), {
+            "ambient_residual": m,
+            "map_penalty": self.l1_weight * (m * free).abs().mean(),
+        }
+
+
 declare_planned("ambient", "sh")
