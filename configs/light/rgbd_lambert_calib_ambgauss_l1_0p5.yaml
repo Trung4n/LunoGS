@@ -1,0 +1,6 @@
+# As rgbd_lambert_calib_ambgauss_l1_0p2.yaml, stronger (docs/DECISIONS.md D123).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgauss.yaml"
+
+Light:
+  ambient:
+    l1_weight: 0.5

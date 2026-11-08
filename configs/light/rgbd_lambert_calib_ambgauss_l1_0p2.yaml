@@ -1,0 +1,8 @@
+# Per-Gaussian ambient with a stronger L1 on the residual (docs/DECISIONS.md
+# D123): on lit, where the true ambient is uniform, l1_weight 0.05 let the
+# residual trade with the albedo (albedo PSNR 33.11 -> 29.74, D122).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgauss.yaml"
+
+Light:
+  ambient:
+    l1_weight: 0.2

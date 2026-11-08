@@ -8,11 +8,14 @@
 #
 #   schedule:
 #     - {after_keyframes: <n>, unfreeze: [<path>, ...]}
+#     - {after_keyframes: <n>, until_keyframes: <m>, unfreeze: [<path>, ...]}
 #
 # A path names the parameter inside the Light block: "angular.half_angle_deg",
 # "pose.R_CL", "pose.t_CL", "intensity", "ambient.c", "falloff.tau", ...
 # A parameter is updated once the map holds MORE than after_keyframes
-# keyframes (same convention as the lambert warm-up, D43). Every learnable
+# keyframes (same convention as the lambert warm-up, D43). until_keyframes
+# (optional, D123): the parameter stops, keeping its value, once the map holds
+# MORE than m keyframes; without it, it learns to the end. Every learnable
 # parameter must appear in exactly one entry; a schedule without any
 # learnable parameter is an error too (a stale ablation line).
 #
@@ -35,6 +38,7 @@ class LearnableParam:
     lr: float
     prior_weight: float
     after_keyframes: int = None  # from Light.schedule
+    until_keyframes: int = None  # from Light.schedule; None = no end (D123)
     check: object = None  # zero-argument callable raising on an invalid value
     # Zero-argument callable restoring the parameter's constraints after a
     # step (projected gradient, e.g. the monotone spline, D67), or None.
@@ -80,8 +84,9 @@ def make_learnable(path, tensor, spec, check=None, project=None):
 
 
 def read_schedule(light_cfg, learnable):
-    """Fills after_keyframes of every LearnableParam (dict path -> param) from
-    Light.schedule, with the checks described at the top of the module."""
+    """Fills after_keyframes and until_keyframes of every LearnableParam (dict
+    path -> param) from Light.schedule, with the checks described at the top
+    of the module."""
     if not learnable:
         if "schedule" in light_cfg:
             raise ValueError("Light.schedule is given but no light parameter is learnable")
@@ -94,12 +99,15 @@ def read_schedule(light_cfg, learnable):
         where = f"Light.schedule[{i}]"
         if not isinstance(entry, dict):
             raise TypeError(f"{where} must be a block, got {entry!r}")
-        extra = set(entry) - {"after_keyframes", "unfreeze"}
+        extra = set(entry) - {"after_keyframes", "until_keyframes", "unfreeze"}
         if extra:
             raise ValueError(f"{where}: unexpected keys {sorted(extra)}")
         after = require_key(entry, "after_keyframes", where)
         if isinstance(after, bool) or not isinstance(after, int) or after < 0:
             raise ValueError(f"{where}.after_keyframes must be an integer >= 0, got {after!r}")
+        until = entry.get("until_keyframes")
+        if until is not None and (isinstance(until, bool) or not isinstance(until, int) or until <= after):
+            raise ValueError(f"{where}.until_keyframes must be an integer > after_keyframes, got {until!r}")
         paths = require_key(entry, "unfreeze", where)
         if not isinstance(paths, list) or not paths:
             raise TypeError(f"{where}.unfreeze must be a non-empty list, got {paths!r}")
@@ -111,12 +119,13 @@ def read_schedule(light_cfg, learnable):
                 )
             if path in seen:
                 raise ValueError(f"Light.schedule: '{path}' is unfrozen twice")
-            seen[path] = after
+            seen[path] = (after, until)
     missing = set(learnable) - set(seen)
     if missing:
         raise KeyError(f"Light.schedule: learnable parameters never unfrozen: {sorted(missing)}")
-    for path, after in seen.items():
+    for path, (after, until) in seen.items():
         learnable[path].after_keyframes = after
+        learnable[path].until_keyframes = until
 
 
 class LightLearner:
@@ -132,7 +141,9 @@ class LightLearner:
         )
 
     def active(self, n_keyframes):
-        return [path for path, p in self.params.items() if n_keyframes > p.after_keyframes]
+        return [path for path, p in self.params.items()
+                if n_keyframes > p.after_keyframes
+                and (p.until_keyframes is None or n_keyframes <= p.until_keyframes)]
 
     def at_bound_counts(self):
         """{path: steps clipped onto the domain boundary} for the parameters

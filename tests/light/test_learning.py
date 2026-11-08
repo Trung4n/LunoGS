@@ -86,6 +86,10 @@ def test_learnable_requires_a_schedule_entry():
     ({"after_keyframes": -1, "unfreeze": ["angular.half_angle_deg"]}, ValueError),
     ({"after_keyframes": 0, "unfreeze": []}, TypeError),
     ({"after_keyframes": 0, "unfreeze": ["angular.half_angle_deg"], "lr": 1}, ValueError),
+    ({"after_keyframes": 5, "until_keyframes": 5, "unfreeze": ["angular.half_angle_deg"]}, ValueError),
+    ({"after_keyframes": 5, "until_keyframes": 2, "unfreeze": ["angular.half_angle_deg"]}, ValueError),
+    ({"after_keyframes": 0, "until_keyframes": 2.5, "unfreeze": ["angular.half_angle_deg"]}, ValueError),
+    ({"after_keyframes": 0, "until_keyframes": True, "unfreeze": ["angular.half_angle_deg"]}, ValueError),
 ])
 def test_schedule_validated(entry, error):
     with pytest.raises(error):
@@ -147,6 +151,26 @@ def test_schedule_gates_the_updates():
     now = sh.learnable_state()
     assert now["angular.half_angle_deg"] != start["angular.half_angle_deg"]
     assert now["pose.R_CL"] == start["pose.R_CL"]
+
+
+def test_until_keyframes_stops_the_parameter_at_its_value():
+    # D123: active for after < n <= until, then the value stays.
+    sh = build_shader(_config(half=_learn(), schedule=[
+        {"after_keyframes": 2, "until_keyframes": 4, "unfreeze": ["angular.half_angle_deg"]}]), PARAMS)
+    learner = LightLearner(sh.learnable_params())
+    assert [bool(learner.active(n)) for n in (2, 3, 4, 5, 100)] == [False, True, True, False, False]
+
+    def step(n):
+        out = sh(_gbuffer(torch.full((3, H, W), 0.5)), CAM)["radiance_linear"]
+        out.sum().backward()
+        learner.step(n)
+        return sh.learnable_state()["angular.half_angle_deg"]
+
+    start = sh.learnable_state()["angular.half_angle_deg"]
+    moved = step(4)
+    assert moved != start
+    assert step(5) == moved  # also Adam's momentum does not move it on
+    assert learner.prior_loss(5) is None
 
 
 def test_prior_pulls_to_the_starting_value():

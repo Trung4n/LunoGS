@@ -1,0 +1,10 @@
+# Per-Gaussian ambient with the global level c frozen when the residual opens
+# (docs/DECISIONS.md D123): E_i = c + r_i, so every change of c moves E of all
+# Gaussians until their residuals follow, also those outside the window, and c
+# swung 0.21 -> 0.09 -> 0.16 on ambvar_hard (D122). until_keyframes equals
+# Light.ambient.residual_after_keyframes.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgauss.yaml"
+
+Light:
+  schedule:
+    - {after_keyframes: 10, until_keyframes: 20, unfreeze: [ambient.c]}
