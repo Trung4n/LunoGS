@@ -235,6 +235,8 @@ def test_light_config_set():
         "rgbd_lambert_calib_ambgauss_cfreeze.yaml",
         "rgbd_lambert_calib_ambgauss_gate.yaml",
         "rgbd_lambert_calib_ambgrid.yaml",
+        "rgbd_lambert_calib_ambgrid_cell1p0.yaml",
+        "rgbd_lambert_calib_ambgrid_cell0p25.yaml",
         "rgbd_lambert_selfcal_tcl_ruler.yaml",
         "rgbd_lambert_selfcal_tcl_zero.yaml",
         "rgbd_lambert_selfcal_tcl_xy.yaml",
