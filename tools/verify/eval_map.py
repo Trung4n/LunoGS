@@ -134,9 +134,20 @@ def learned_state(csv_path):
         rows = list(csv.DictReader(f))
     if not rows:
         raise ValueError(f"{csv_path}: empty")
-    state = {}
+    # Parameters too large for the CSV (D126): the CSV holds a summary of them
+    # and the file next to it their values at its last row.
+    from light_models.diagnostics import LEARNED_LARGE_NAME
+
+    large_path = os.path.join(os.path.dirname(csv_path), LEARNED_LARGE_NAME)
+    large = {}
+    if os.path.isfile(large_path):
+        with np.load(large_path) as z:
+            large = {k: z[k].tolist() for k in z.files}
+    state = dict(large)
     for k, v in rows[-1].items():
         if k in ("frame_idx", "n_keyframes") or k.endswith(".n_at_bound"):
+            continue
+        if any(k.startswith(path + ".") for path in large):
             continue
         if "[" in k:
             name, i = k[:-1].split("[")

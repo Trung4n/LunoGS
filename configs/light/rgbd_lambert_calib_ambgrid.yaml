@@ -1,0 +1,24 @@
+# Main model with the ambient light as a coarse field over the scene
+# (docs/DECISIONS.md D125, D126): E(x) = max(c + r(x), 0), r a trilinear grid in
+# the world frame, for rooms lit by static lamps besides the co-located one.
+#   - c: the global level, learned in mapping exactly as in the main model;
+#   - r: opens after 20 keyframes, as the residual of ambgauss, so that the
+#     two compare directly;
+#   - cell_m 0.5: fitted on the true E of ambvar_*, the best case is 3% median
+#     error with about 600 vertices in use (D125);
+#   - half_extent_m 8: the maps of office0 and room0 fit (|x| up to 7.5 m).
+inherit_from: "configs/light/rgbd_lambert_calib.yaml"
+
+Light:
+  ambient:
+    _replace: true
+    type: position_grid
+    c: {source: value, value: 0.05, learnable: true, lr: 0.001, prior_weight: 0.0, at_bound: project}
+    channels: 1
+    cell_m: 0.5
+    half_extent_m: 8.0
+    residual_lr: 0.001
+    l1_weight: 0.05
+  schedule:
+    - {after_keyframes: 10, unfreeze: [ambient.c]}
+    - {after_keyframes: 20, unfreeze: [ambient.residual]}

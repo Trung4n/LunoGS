@@ -3,6 +3,11 @@
 # predicted linear radiance. Both constant forms exist so they can be
 # compared (CLAUDE.md section 4.3); the data verified the multiplicative one.
 
+import math
+
+import torch
+import torch.nn.functional as F
+
 from light_models.registry import declare_planned, register
 
 
@@ -202,6 +207,79 @@ class PerGaussianGated(PerGaussian):
             "ambient_residual": m,
             "map_penalty": self.l1_weight * (m * free).abs().mean(),
         }
+
+
+@register("ambient", "position_grid", numeric=("c",),
+          options=("channels", "cell_m", "half_extent_m", "residual_lr", "l1_weight"))
+class PositionGrid(MultiplicativeConst):
+    """Ambient light as a coarse field over the scene (docs/DECISIONS.md D125,
+    D126): E(x) = max(c + r(x), 0), x the surface point in the WORLD frame, r
+    a trilinear grid with vertices every `cell_m` on the cube of half side
+    `half_extent_m` around the world origin. For diffuse surfaces the
+    irradiance of static lamps depends on where the surface is, and a vertex
+    is shared by many Gaussians, so r cannot follow the noise of one of them.
+    It is looked up per pixel in the shading: no extra raster pass.
+
+    r starts at 0, so unseen regions and new Gaussians take the level c, and
+    new Gaussians in a seen region the E around them. Its values are a
+    learnable light parameter "ambient.residual": Light.schedule says when it
+    opens, only mapping updates it. The lookup position is detached: the field
+    must not pull the geometry or the pose. Mapping adds l1_weight * mean |M|,
+    M = A * (E - c), which keeps c at the level of the scene (CLAUDE.md 4.3);
+    the penalty acts on r only. Points outside the cube take the value of the
+    nearest border and are counted in the summary (outside_frac)."""
+
+    world_field = True
+    RESIDUAL = "residual"
+
+    def __init__(self, c, channels, cell_m, half_extent_m, residual_lr, l1_weight):
+        super().__init__(c)
+        if channels not in (1, 3) or isinstance(channels, bool):
+            raise ValueError(f"Light.ambient.channels must be 1 or 3, got {channels!r}")
+        for name, v in (("cell_m", cell_m), ("half_extent_m", half_extent_m),
+                        ("residual_lr", residual_lr), ("l1_weight", l1_weight)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+                raise ValueError(f"Light.ambient.{name} must be a positive number, got {v!r}")
+        cells = 2.0 * half_extent_m / cell_m
+        if not math.isclose(cells, round(cells)):
+            raise ValueError(f"Light.ambient: 2 * half_extent_m ({half_extent_m}) must be a multiple of cell_m ({cell_m})")
+        n = round(cells) + 1
+        self.half_extent_m = float(half_extent_m)
+        self.residual_lr = float(residual_lr)
+        self.l1_weight = float(l1_weight)
+        self.residual = torch.zeros(channels, n, n, n, dtype=torch.float32, requires_grad=True)
+        self._outside_frac = 0.0
+
+    def learnable_extra(self, prefix):
+        from light_models.learning import LearnableParam
+
+        path = f"{prefix}.{self.RESIDUAL}"
+        return {path: LearnableParam(path, self.residual, self.residual.detach().clone(),
+                                     self.residual_lr, 0.0, summary=self.residual_summary)}
+
+    def residual_summary(self):
+        r = self.residual.detach()
+        moved = r != 0
+        return {"abs_mean_moved": float(r[moved].abs().mean()) if moved.any() else 0.0,
+                "min": float(r.min()), "max": float(r.max()),
+                "vertices_moved": float(moved.sum()), "outside_frac": self._outside_frac}
+
+    def field(self, points_world):
+        """(channels,H,W) r at the (3,H,W) world points."""
+        dev, dt = points_world.device, points_world.dtype
+        coords = (points_world / self.half_extent_m).permute(1, 2, 0)[None, None]
+        grid = self.residual.to(dev, dt)[None]
+        return F.grid_sample(grid, coords, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0]
+
+    def __call__(self, albedo, direct, points_world):
+        points_world = points_world.detach()
+        self._outside_frac = float((points_world.abs() > self.half_extent_m).any(0).float().mean())
+        r = self.field(points_world)
+        c = self.c.to(albedo.device, albedo.dtype)
+        radiance = albedo * (_direct3(direct) + (c + r).clamp_min(0.0))
+        fixed_c = c.detach()
+        m = albedo.detach() * ((fixed_c + r).clamp_min(0.0) - fixed_c)
+        return radiance, {"ambient_residual": m, "map_penalty": self.l1_weight * m.abs().mean()}
 
 
 declare_planned("ambient", "sh")

@@ -52,6 +52,11 @@ class LearnableParam:
     # 0/1 tensor of the parameter's shape: elements with 0 keep their value
     # (ParamSpec learn_mask, D108); None = every element learns.
     grad_mask: torch.Tensor = None
+    # Zero-argument callable -> {name: number}, for a parameter too large for
+    # one CSV column per value (the ambient grid, D126): light_learned.csv
+    # gets these numbers, the values go to light_learned_large.npz. None =
+    # every value is a column.
+    summary: object = None
 
 
 def make_learnable(path, tensor, spec, check=None, project=None):

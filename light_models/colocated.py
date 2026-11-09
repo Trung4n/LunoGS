@@ -84,6 +84,9 @@ class ColocatedShader:
         # Ambient forms with per-Gaussian values read rasterized maps from
         # the G-buffer and return auxiliary outputs (D121).
         self._ambient_maps = hasattr(self.ambient, "extra_rasters")
+        # Ambient forms that are a field over the scene read the surface
+        # points in the world frame (D126).
+        self._ambient_field = getattr(self.ambient, "world_field", False)
 
         gb = require_key(light_cfg, "gbuffer", where)
         thr = require_key(gb, "opacity_thr", "Light.gbuffer")
@@ -147,6 +150,18 @@ class ColocatedShader:
     def learnable_state(self):
         """Current values, plain lists / floats (sent backend -> frontend)."""
         return {path: p.tensor.detach().tolist() for path, p in self._learnable.items()}
+
+    def learned_for_log(self):
+        """(state for light_learned.csv, {path: array} of the parameters with a
+        summary, for light_learned_large.npz, D126)."""
+        state, large = {}, {}
+        for path, p in self._learnable.items():
+            if p.summary is None:
+                state[path] = p.tensor.detach().tolist()
+            else:
+                large[path] = p.tensor.detach().cpu().numpy()
+                state.update({f"{path}.{k}": v for k, v in p.summary().items()})
+        return state, large
 
     def load_learnable_state(self, state):
         if set(state) != set(self._learnable):
@@ -219,7 +234,13 @@ class ColocatedShader:
         cos_term, aux = self.cosine(points, valid, to_light, gbuffer, viewpoint_camera)
         k = self.intensity.to(dev, dt)
         direct = k * (phi * fall * cos_term)
-        if self._ambient_maps:
+        if self._ambient_field:
+            # x_C = R x_W + T (Camera.R, Camera.T: world to camera).
+            rot = viewpoint_camera.R.to(dev, dt)
+            trans = viewpoint_camera.T.to(dev, dt).view(3, 1, 1)
+            world = (rot.T @ (points - trans).flatten(1)).view_as(points)
+            radiance, amb = self.ambient(albedo, direct, world)
+        elif self._ambient_maps:
             radiance, amb = self.ambient(albedo, direct, gbuffer)
         else:
             radiance, amb = self.ambient(albedo, direct), {}

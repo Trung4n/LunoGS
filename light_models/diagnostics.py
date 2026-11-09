@@ -171,6 +171,7 @@ def log_timing(save_dir, kind, index, ms, iters):
 
 
 LEARNED_CSV_NAME = "light_learned.csv"
+LEARNED_LARGE_NAME = "light_learned_large.npz"
 
 
 def _flatten(state):
@@ -187,17 +188,26 @@ def _flatten(state):
     return out
 
 
-def log_learned_light(save_dir, frame_idx, n_keyframes, state, at_bound):
+def log_learned_light(save_dir, frame_idx, n_keyframes, state, at_bound, large=None):
     """Learned light parameters after a keyframe's mapping (D60):
     <save_dir>/light_learned.csv. pose.R_CL is the tilt of the light axis in
     degrees (about camera x, y). CSV only, no console line: a spline has 50
     values per keyframe (D69); summarize_csv_logs prints first -> middle ->
     last at the end of the run. at_bound: {path: learning steps clipped onto
     the domain boundary so far} (ParamSpec at_bound: project, D70), written
-    as the column <path>.n_at_bound."""
+    as the column <path>.n_at_bound. large: {path: array} of the parameters
+    too large for the CSV (D126): the latest values, overwritten each time in
+    <save_dir>/light_learned_large.npz, so they match the CSV's last row."""
     flat = _flatten(state) + [(f"{p}.n_at_bound", float(n)) for p, n in sorted(at_bound.items())]
     if save_dir is None:
         return
+    if large:
+        import numpy as np
+
+        target = os.path.join(save_dir, LEARNED_LARGE_NAME)
+        partial = target + ".partial.npz"
+        np.savez_compressed(partial, **large)
+        os.replace(partial, target)
     path = os.path.join(save_dir, LEARNED_CSV_NAME)
     write_header = not os.path.exists(path)
     with open(path, "a", encoding="utf-8") as f:

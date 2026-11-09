@@ -21,6 +21,8 @@ EXTRA_FILES = (
     # copies it next to config.yml): the fixed light values (D101)
     "light_params.json",
     "light_learned.csv",
+    # the values of the parameters too large for that CSV (D126)
+    "light_learned_large.npz",
     "timing.csv",
     "albedo_stats.csv",
     "exposure_stats.csv",
