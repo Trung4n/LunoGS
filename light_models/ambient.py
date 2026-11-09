@@ -174,9 +174,14 @@ class PerGaussianGated(PerGaussian):
     the direct term (normals, profile), much larger than any ambient signal,
     while r_i barely changes the image there; the wrong E then shows outside
     the cone and the albedo pays for it. So on pixels with direct above
-    `residual_direct_max`, M still shades the image but gives no gradient and
-    no penalty. The penalty keeps the mean over all pixels, as the photometric
-    loss, so l1_weight means the same as in per_gaussian."""
+    `residual_direct_max`, M and c still shade the image but give no gradient
+    to the ambient term, and M no penalty. c needs the same gate: outside the
+    cone r follows any change of c, so nothing would hold c against the votes
+    from under the lamp, and it collapsed to 0 in the runs of D124. The albedo
+    keeps its gradient through A * c. The penalty keeps the mean over all
+    pixels, as the photometric loss, so l1_weight means the same as in
+    per_gaussian. While the residual is off, c learns from every pixel, as in
+    multiplicative_const."""
 
     def __init__(self, c, channels, residual_lr, residual_after_keyframes, l1_weight, residual_direct_max):
         super().__init__(c, channels, residual_lr, residual_after_keyframes, l1_weight)
@@ -186,11 +191,13 @@ class PerGaussianGated(PerGaussian):
         self.residual_direct_max = float(v)
 
     def __call__(self, albedo, direct, gbuffer):
-        radiance = MultiplicativeConst.__call__(self, albedo, direct)
         if not self.residual_active():
-            return radiance, {}
+            return MultiplicativeConst.__call__(self, albedo, direct), {}
         m = gbuffer[self.EXTRA]
-        free = _direct3(direct).amax(0, keepdim=True) <= self.residual_direct_max
+        d = _direct3(direct)
+        free = d.amax(0, keepdim=True) <= self.residual_direct_max
+        c = self.c.to(albedo.device, albedo.dtype)
+        radiance = albedo * (d + c.where(free, c.detach()))
         return radiance + m.where(free, m.detach()), {
             "ambient_residual": m,
             "map_penalty": self.l1_weight * (m * free).abs().mean(),

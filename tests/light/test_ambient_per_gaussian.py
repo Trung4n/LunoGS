@@ -169,6 +169,30 @@ def test_gate_keeps_the_image_and_cuts_gradient_and_penalty_under_the_lamp():
     assert m.grad[:, 0, :2].sub(expected).abs().max() < 1e-7 and m.grad[:, 0, 2].eq(0).all()
 
 
+def test_gate_cuts_the_gradient_of_c_under_the_lamp_but_not_of_the_albedo():
+    shader = _gated()
+    amb = shader.ambient
+    amb.c = amb.c.clone().requires_grad_()
+    albedo = torch.full((3, 1, 2), 0.5, requires_grad=True)
+    direct = torch.tensor([[0.0, 2.0]])
+    radiance, _ = amb(albedo, direct, {"ambient_residual": torch.zeros(3, 1, 2)})
+    torch.testing.assert_close(radiance[:, 0, 1].detach(), torch.full((3,), 0.5 * 2.1))
+    amb_grad, alb_grad = torch.autograd.grad(radiance[:, 0, 1].sum(), (amb.c, albedo), retain_graph=True)
+    assert amb_grad.eq(0).all()
+    assert alb_grad[:, 0, 1].sub(2.1).abs().max() < 1e-6
+    amb_grad = torch.autograd.grad(radiance[:, 0, 0].sum(), amb.c)[0]
+    assert amb_grad.sub(1.5).abs().max() < 1e-6  # 3 channels of albedo 0.5
+
+
+def test_c_learns_from_every_pixel_while_the_residual_is_off():
+    shader = _gated()
+    shader.set_keyframe_count(0)
+    amb = shader.ambient
+    amb.c = amb.c.clone().requires_grad_()
+    radiance, _ = amb(torch.full((3, 1, 1), 0.5), torch.tensor([[2.0]]), {})
+    assert torch.autograd.grad(radiance.sum(), amb.c)[0].sub(1.5).abs().max() < 1e-6
+
+
 def test_gate_above_every_direct_matches_per_gaussian():
     albedo = torch.rand(3, 2, 3)
     direct = torch.rand(2, 3)
