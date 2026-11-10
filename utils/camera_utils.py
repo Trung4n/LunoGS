@@ -171,8 +171,10 @@ class Camera(nn.Module):
                                 for a, b in zip(cache[0], key)):
             wv = getWorld2View2(self.R, self.T).transpose(0, 1)
             fp = wv.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0)).squeeze(0)
-            # inverse(world_view)[3, :3] for a rigid pose: -R^T T.
-            cc = -(self.R.transpose(0, 1) @ self.T)
+            # inverse(world_view)[3, :3] for a rigid pose: -R^T T, read from
+            # wv (float32 like before, even when R, T are float64: the first
+            # frame gets the dataset's float64 ground-truth pose).
+            cc = -(wv[:3, :3] @ wv[3, :3])
             cache = (key, (wv, fp, cc))
             self._matrix_cache = cache
         return cache[1]

@@ -51,7 +51,8 @@ def _lower_median(values, mask):
     count = mask.sum()
     ordered = torch.sort(flat).values
     # index_select, not ordered[tensor]: a 0-d tensor index synchronizes.
-    pick = ordered.index_select(0, (count - 1).clamp_min(0).view(1))[0]
+    middle = torch.div(count - 1, 2, rounding_mode="floor").clamp_min(0)
+    pick = ordered.index_select(0, middle.view(1))[0]
     return torch.where(count > 0, pick, torch.full_like(pick, float("nan")))
 
 

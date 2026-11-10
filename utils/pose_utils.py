@@ -145,7 +145,7 @@ def update_pose_host(camera, converged_threshold=1e-4):
     (docs/DECISIONS.md D128). The loop synchronizes with the GPU every
     iteration anyway to test convergence; reading the 6-vector there and doing
     the SE(3) update on the host replaces ~40 tiny GPU kernels. Same formulas,
-    in float64, then back to the camera's float32 R, T. Returns a bool."""
+    in float64, then float32 like update_pose. Returns a bool."""
     tau = torch.cat([camera.cam_trans_delta, camera.cam_rot_delta], axis=0).detach()
     tau = tau.to("cpu", torch.float64)
     T_w2c = torch.eye(4, dtype=torch.float64)
@@ -153,7 +153,10 @@ def update_pose_host(camera, converged_threshold=1e-4):
     T_w2c[0:3, 3] = camera.T.detach().to("cpu", torch.float64)
     new_w2c = SE3_exp(tau) @ T_w2c
     converged = bool(tau.norm() < converged_threshold)
-    camera.update_RT(new_w2c[0:3, 0:3].to(camera.R.dtype), new_w2c[0:3, 3].to(camera.T.dtype))
+    # float32 as update_pose gives (its T_w2c is a default-dtype eye), also
+    # when the camera started from the float64 ground-truth pose.
+    dtype = torch.get_default_dtype()
+    camera.update_RT(new_w2c[0:3, 0:3].to(dtype), new_w2c[0:3, 3].to(dtype))
     camera.cam_rot_delta.data.fill_(0)
     camera.cam_trans_delta.data.fill_(0)
     return converged

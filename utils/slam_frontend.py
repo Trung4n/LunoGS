@@ -358,9 +358,12 @@ class FrontEnd(mp.Process):
         before = self.cameras.get(cur_frame_idx - 2 * step)
         if self.motion_model == "none" or before is None:
             return prev.R, prev.T
-        # Rigid inverse of w2c_{k-2}: (R^T, -R^T T).
-        r_rel = prev.R @ before.R.transpose(0, 1)
-        t_rel = prev.T - r_rel @ before.T
+        # Rigid inverse of w2c_{k-2}: (R^T, -R^T T). The first frame holds the
+        # dataset's float64 pose: compute in the previous frame's dtype.
+        dtype = prev.R.dtype
+        b_r, b_t = before.R.to(dtype), before.T.to(dtype)
+        r_rel = prev.R @ b_r.transpose(0, 1)
+        t_rel = prev.T - r_rel @ b_t
         return r_rel @ prev.R, r_rel @ prev.T + t_rel
 
     def gui_enabled(self):
