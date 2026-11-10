@@ -143,11 +143,17 @@ class GaussianModel:
     @property
     def get_scaling(self):
         # (N,3) standard deviations (> 0).
+        frozen = self.__dict__.get("_frozen")
+        if frozen is not None:
+            return frozen["scaling"]
         return self.scaling_activation(self._scaling)
 
     @property
     def get_rotation(self):
         # (N,4) unit quaternions.
+        frozen = self.__dict__.get("_frozen")
+        if frozen is not None:
+            return frozen["rotation"]
         return self.rotation_activation(self._rotation)
 
     @property
@@ -157,6 +163,9 @@ class GaussianModel:
     @property
     def get_features(self):
         # (N,(max_sh_degree+1)^2,3) all SH coefficients, DC first.
+        frozen = self.__dict__.get("_frozen")
+        if frozen is not None:
+            return frozen["features"]
         features_dc = self._features_dc
         features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
@@ -198,7 +207,21 @@ class GaussianModel:
     @property
     def get_opacity(self):
         # (N,1) opacity in (0,1).
+        frozen = self.__dict__.get("_frozen")
+        if frozen is not None:
+            return frozen["opacity"]
         return self.opacity_activation(self._opacity)
+
+    def freeze_activations(self):
+        """For a map snapshot that will not change (the frontend's, between
+        two backend messages): scaling, rotation, opacity and features are
+        computed once instead of at every render (docs/DECISIONS.md D130).
+        Same values: the activations of the same tensors."""
+        self._frozen = None
+        frozen = {"scaling": self.get_scaling, "rotation": self.get_rotation,
+                  "opacity": self.get_opacity, "features": self.get_features}
+        self._frozen = frozen
+        return self
 
     def get_covariance(self, scaling_modifier=1):
         # Uses the raw quaternion; build_rotation normalizes it internally.

@@ -195,6 +195,13 @@ class SensorDepthFiniteDifference:
                 "normal_source 'sensor_depth_fd' needs the observed frame's sensor "
                 "depth (camera.depth): RGB-D only"
             )
+        if getattr(camera, "frame_cache", None) is not None:
+            # Tracking: once per frame, in the frame's static buffers (D130).
+            from utils.perf import frame_constant
+
+            n, ok = frame_constant(camera, ("sensor_normals", self.fd_class.__name__),
+                                   lambda: self._from_sensor(depth, camera, points, gbuffer))
+            return n, (ok & valid) if self.trusted_pixels_only else ok
         # The key holds the camera and depth objects themselves (not their
         # id(), which Python reuses after garbage collection).
         cached = self._cache_key
@@ -205,15 +212,18 @@ class SensorDepthFiniteDifference:
             and cached[2:] == (points.device, points.dtype)
         )
         if not hit:
-            z = depth if torch.is_tensor(depth) else torch.from_numpy(depth)
-            z = z.to(points.device, points.dtype).reshape(points.shape[1:])
-            h, w = z.shape
-            rays = pixel_rays(camera, h, w, points.device, points.dtype, 0.0)
-            # 0 = no sensor reading (the dataset's convention), not a threshold.
-            self._cache = self.fd(rays * z[None], z > 0, gbuffer, camera)
+            self._cache = self._from_sensor(depth, camera, points, gbuffer)
             self._cache_key = (camera, depth, points.device, points.dtype)
         n, ok = self._cache
         return n, (ok & valid) if self.trusted_pixels_only else ok
+
+    def _from_sensor(self, depth, camera, points, gbuffer):
+        z = depth if torch.is_tensor(depth) else torch.from_numpy(depth)
+        z = z.to(points.device, points.dtype).reshape(points.shape[1:])
+        h, w = z.shape
+        rays = pixel_rays(camera, h, w, points.device, points.dtype, 0.0)
+        # 0 = no sensor reading (the dataset's convention), not a threshold.
+        return tuple(self.fd(rays * z[None], z > 0, gbuffer, camera))
 
 
 @register("normals", "sensor_depth_fd_edge", options=("stencil_px", "trusted_pixels_only"))

@@ -44,6 +44,7 @@ def render(
     mask=None,
     *,
     shader,
+    defer_shading=False,
 ):
     """
     Render the scene.
@@ -297,17 +298,31 @@ def render(
                 theta=viewpoint_camera.cam_rot_delta,
                 rho=viewpoint_camera.cam_trans_delta,
             )[0]
-        shaded = shader(gbuffer, viewpoint_camera)
-        radiance_linear = shaded["radiance_linear"]
-        if radiance_linear.shape != rendered_image.shape:
-            raise ValueError(
-                f"shader returned shape {tuple(radiance_linear.shape)}, "
-                f"expected {tuple(rendered_image.shape)}"
-            )
-        clash = (set(shaded) - {"radiance_linear"}) & (set(render_pkg) | {"albedo"})
-        if clash:
-            raise ValueError(f"shader output keys {sorted(clash)} clash with render_pkg")
-        render_pkg.update(shaded)  # radiance_linear (3,H,W) linear + aux maps
-        render_pkg["albedo"] = rendered_image  # (3,H,W) linear, opacity-weighted
-        render_pkg["render"] = linear2sRGB(radiance_linear)
+        if defer_shading:
+            # The caller shades later with apply_shading (the tracking loop
+            # replays shading + loss as one CUDA graph, D130).
+            render_pkg["gbuffer"] = gbuffer
+            return render_pkg
+        apply_shading(render_pkg, gbuffer, shader, viewpoint_camera)
+    return render_pkg
+
+
+def apply_shading(render_pkg, gbuffer, shader, viewpoint_camera):
+    """Second half of render() with a shader: shades the G-buffer and fills
+    radiance_linear, the shader's maps, albedo and the sRGB render into
+    render_pkg (in place, also returned)."""
+    rendered_image = gbuffer["albedo"]
+    shaded = shader(gbuffer, viewpoint_camera)
+    radiance_linear = shaded["radiance_linear"]
+    if radiance_linear.shape != rendered_image.shape:
+        raise ValueError(
+            f"shader returned shape {tuple(radiance_linear.shape)}, "
+            f"expected {tuple(rendered_image.shape)}"
+        )
+    clash = (set(shaded) - {"radiance_linear"}) & (set(render_pkg) | {"albedo"})
+    if clash:
+        raise ValueError(f"shader output keys {sorted(clash)} clash with render_pkg")
+    render_pkg.update(shaded)  # radiance_linear (3,H,W) linear + aux maps
+    render_pkg["albedo"] = rendered_image  # (3,H,W) linear, opacity-weighted
+    render_pkg["render"] = linear2sRGB(radiance_linear)
     return render_pkg

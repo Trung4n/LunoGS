@@ -20,8 +20,16 @@ def on_device(t, device, dtype):
         return t.to(device, dtype)
     key = (t._version, str(device), dtype)
     entry = _COPIES.get(id(t))
-    if entry is not None and entry[0]() is t and entry[1] == key:
-        return entry[2]
+    if entry is not None and entry[0]() is t:
+        if entry[1] == key:
+            return entry[2]
+        held = entry[2]
+        if entry[1][1:] == key[1:] and held.shape == t.shape:
+            # New values, same memory: a CUDA graph replaying the shading
+            # keeps reading this buffer (D130).
+            held.copy_(t.detach())
+            _COPIES[id(t)] = (entry[0], key, held)
+            return held
     copy = t.detach().to(device, dtype)
     if len(_COPIES) > 64:
         # Drop the entries of tensors that no longer exist.

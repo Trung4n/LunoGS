@@ -276,11 +276,16 @@ class FrontEnd(mp.Process):
         )
 
         # A fresh optimizer per frame: Adam state never carries over.
-        pose_optimizer = torch.optim.Adam(opt_params)
+        # fused: one kernel for all groups instead of a few per tensor (D130).
+        pose_optimizer = torch.optim.Adam(opt_params, fused=True)
         # Constants of the observed frame (sensor depth on the GPU, masks of
         # the observation, ...) are built once per frame instead of once per
         # iteration (utils/perf.py, docs/DECISIONS.md D128).
-        viewpoint.frame_cache = {}
+        graphed = self.graphed_shading()
+        if graphed is not None:
+            graphed.begin_frame(viewpoint)
+        else:
+            viewpoint.frame_cache = {}
         gui = self.gui_enabled()
         for tracking_itr in range(self.tracking_itr_num):
             render_pkg = render(
@@ -289,14 +294,21 @@ class FrontEnd(mp.Process):
                 self.pipeline_params,
                 self.background,
                 shader=self.shader,
+                defer_shading=graphed is not None,
             )
+            pose_optimizer.zero_grad()
+            if graphed is None:
+                loss_tracking = get_loss_tracking(self.config, render_pkg, viewpoint)
+            else:
+                # Shading + loss replayed as CUDA graphs (D130); the frame's
+                # first iteration runs them eagerly to fill its buffers.
+                loss_tracking, render_pkg = graphed.step(
+                    render_pkg, viewpoint, len(self.kf_indices), eager=tracking_itr == 0)
             image, depth, opacity = (
                 render_pkg["render"],
                 render_pkg["depth"],
                 render_pkg["opacity"],
             )
-            pose_optimizer.zero_grad()
-            loss_tracking = get_loss_tracking(self.config, render_pkg, viewpoint)
             loss_tracking.backward()
 
             with torch.no_grad():
@@ -344,8 +356,21 @@ class FrontEnd(mp.Process):
         if usage is not None and usage["frac_used_tracking"] == 0.0:
             # Nothing left for the tracking loss: the pose cannot move (D43).
             Log(f"frame {cur_frame_idx}: the tracking loss uses no pixel", tag="Light")
-        viewpoint.frame_cache = None
+        if graphed is not None:
+            graphed.end_frame(viewpoint)
+        else:
+            viewpoint.frame_cache = None
         return render_pkg
+
+    def graphed_shading(self):
+        """GraphedShadeLoss when Training.cuda_graph_tracking (D130), else None."""
+        if not require_key(self.config["Training"], "cuda_graph_tracking", "Training"):
+            return None
+        if getattr(self, "_graphed", None) is None:
+            from utils.graphed_tracking import GraphedShadeLoss
+
+            self._graphed = GraphedShadeLoss(self.config, self.shader)
+        return self._graphed
 
     def initial_pose(self, cur_frame_idx):
         """(R, T) world-to-camera to start tracking frame cur_frame_idx from.
@@ -530,7 +555,7 @@ class FrontEnd(mp.Process):
         # corrected retroactively.
         # The backend may run on another GPU (slam.py --backend_gpu, D128):
         # its map and covisibility come back to this process's device.
-        self.gaussians = move_obj(data[1], self.device)
+        self.gaussians = move_obj(data[1], self.device).freeze_activations()
         occ_aware_visibility = {k: v.to(self.device) for k, v in data[2].items()}
         keyframes = data[3]
         self.occ_aware_visibility = occ_aware_visibility

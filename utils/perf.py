@@ -11,6 +11,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
+import torch
+
 from utils.logging_utils import Log
 
 
@@ -23,8 +25,25 @@ def frame_constant(camera, key, build):
     if cache is None:
         return build()
     if key not in cache:
-        cache[key] = build()
+        value = build()
+        pool = getattr(camera, "frame_pool", None)
+        if pool is not None:
+            # Static buffers shared by all frames (CUDA graph replay, D130):
+            # the new frame's values are copied into the same memory.
+            value = tuple(_pooled(pool, (key, i), v) for i, v in enumerate(value))                 if isinstance(value, tuple) else _pooled(pool, key, value)
+        cache[key] = value
     return cache[key]
+
+
+def _pooled(pool, key, value):
+    if not torch.is_tensor(value):
+        return value
+    held = pool.get(key)
+    if held is not None and held.shape == value.shape and held.dtype == value.dtype and held.device == value.device:
+        held.copy_(value)
+        return held
+    pool[key] = value
+    return value
 
 
 class FramePrefetcher:

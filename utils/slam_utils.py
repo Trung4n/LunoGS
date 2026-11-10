@@ -39,7 +39,9 @@ def get_observed_in_loss_space(config, viewpoint):
     # stored (sRGB) or converted with the ONE sRGB->linear function.
     observed = viewpoint.original_image.cuda()
     if read_light_tracking(config).loss_color_space == "srgb":
-        return observed
+        # Through frame_constant too: a replayed CUDA graph must read the
+        # observation from the frame's static buffer (D130).
+        return frame_constant(viewpoint, "observed", lambda: observed)
     return frame_constant(viewpoint, "observed_linear", lambda: sRGB2Linear(observed))
 
 

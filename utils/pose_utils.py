@@ -140,23 +140,43 @@ def update_pose(camera, converged_threshold=1e-4):
     return converged
 
 
+def _se3_exp_np(tau):
+    """SE3_exp in numpy float64: same formulas and small-angle branches."""
+    rho, theta = tau[:3], tau[3:]
+    w = np.array([[0.0, -theta[2], theta[1]], [theta[2], 0.0, -theta[0]], [-theta[1], theta[0], 0.0]])
+    w2 = w @ w
+    angle = np.linalg.norm(theta)
+    i = np.eye(3)
+    if angle < 1e-5:
+        r = i + w + 0.5 * w2
+        v = i + 0.5 * w + (1.0 / 6.0) * w2
+    else:
+        r = i + (np.sin(angle) / angle) * w + ((1 - np.cos(angle)) / (angle**2)) * w2
+        v = i + w * ((1.0 - np.cos(angle)) / (angle**2)) + w2 * ((angle - np.sin(angle)) / (angle**3))
+    out = np.eye(4)
+    out[:3, :3] = r
+    out[:3, 3] = v @ rho
+    return out
+
+
 def update_pose_host(camera, converged_threshold=1e-4):
     """update_pose computed on the CPU, for the frontend's tracking loop
     (docs/DECISIONS.md D128). The loop synchronizes with the GPU every
     iteration anyway to test convergence; reading the 6-vector there and doing
     the SE(3) update on the host replaces ~40 tiny GPU kernels. Same formulas,
     in float64, then float32 like update_pose. Returns a bool."""
+    # numpy on the host: dozens of tiny CPU torch ops cost ~1 ms (D130).
     tau = torch.cat([camera.cam_trans_delta, camera.cam_rot_delta], axis=0).detach()
-    tau = tau.to("cpu", torch.float64)
-    T_w2c = torch.eye(4, dtype=torch.float64)
-    T_w2c[0:3, 0:3] = camera.R.detach().to("cpu", torch.float64)
-    T_w2c[0:3, 3] = camera.T.detach().to("cpu", torch.float64)
-    new_w2c = SE3_exp(tau) @ T_w2c
-    converged = bool(tau.norm() < converged_threshold)
+    tau = tau.to("cpu", torch.float64).numpy()
+    T_w2c = np.eye(4)
+    T_w2c[0:3, 0:3] = camera.R.detach().to("cpu", torch.float64).numpy()
+    T_w2c[0:3, 3] = camera.T.detach().to("cpu", torch.float64).numpy()
+    new_w2c = _se3_exp_np(tau) @ T_w2c
+    converged = bool(np.linalg.norm(tau) < converged_threshold)
     # float32 as update_pose gives (its T_w2c is a default-dtype eye), also
     # when the camera started from the float64 ground-truth pose.
     dtype = torch.get_default_dtype()
-    camera.update_RT(new_w2c[0:3, 0:3].to(dtype), new_w2c[0:3, 3].to(dtype))
+    camera.update_RT(torch.from_numpy(new_w2c[0:3, 0:3]).to(dtype), torch.from_numpy(new_w2c[0:3, 3]).to(dtype))
     camera.cam_rot_delta.data.fill_(0)
     camera.cam_trans_delta.data.fill_(0)
     return converged

@@ -171,7 +171,8 @@ def test_on_device_reuses_the_copy_until_the_tensor_changes():
     assert on_device(t, torch.device("cpu"), torch.float64) is a
     t.copy_(torch.tensor([3.0, 4.0]))
     b = on_device(t, torch.device("cpu"), torch.float64)
-    assert b is not a and b.tolist() == [3.0, 4.0]
+    # Same memory, new values: a replayed CUDA graph keeps reading it (D130).
+    assert b is a and b.tolist() == [3.0, 4.0]
     assert on_device(t, torch.device("cpu"), torch.float32) is t
 
 
@@ -276,3 +277,33 @@ def test_move_obj_moves_tensors_and_tensor_dicts():
     obj = SimpleNamespace(a=torch.ones(2), extras={"r": torch.zeros(3)}, n=5, empty={})
     move_obj(obj, torch.device("cpu"))
     assert obj.n == 5 and obj.extras["r"].shape == (3,) and obj.empty == {}
+
+
+# ---------------------------------------------------------------- D130
+
+
+@pytest.mark.parametrize("tau", [[0, 0, 0, 0, 0, 0], [1e-3, -2e-3, 5e-4, 1e-7, 2e-7, -1e-7], [0.1, 0.2, -0.3, 0.4, -0.1, 0.25]])
+def test_numpy_se3_matches_the_torch_one(tau):
+    import numpy as np
+
+    t = torch.tensor(tau, dtype=torch.float64)
+    np.testing.assert_allclose(pose_utils._se3_exp_np(np.array(tau, dtype=np.float64)),
+                               pose_utils.SE3_exp(t).numpy(), atol=1e-12, rtol=0)
+
+
+def test_frozen_activations_equal_the_live_ones():
+    from gaussian_splatting.scene.gaussian_model import GaussianModel
+
+    g = GaussianModel(0)
+    n = 7
+    g._xyz = torch.randn(n, 3)
+    g._scaling = torch.randn(n, 3)
+    g._rotation = torch.randn(n, 4)
+    g._opacity = torch.randn(n, 1)
+    g._features_dc = torch.randn(n, 1, 3)
+    g._features_rest = torch.zeros(n, 0, 3)
+    live = (g.get_scaling, g.get_rotation, g.get_opacity, g.get_features)
+    g.freeze_activations()
+    for a, b in zip(live, (g.get_scaling, g.get_rotation, g.get_opacity, g.get_features)):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
+    assert g.get_scaling is g.get_scaling  # computed once

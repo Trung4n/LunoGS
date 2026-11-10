@@ -74,6 +74,9 @@ Training:
   # none = the previous frame's pose (original MonoGS); constant_velocity =
   # the previous pose moved by the last frame-to-frame motion.
   motion_model: none
+  # Shading + tracking loss replayed as CUDA graphs (light model only,
+  # same values, fewer kernel launches; docs/DECISIONS.md D130).
+  cuda_graph_tracking: false
   mapping_itr_num: 150
   gaussian_update_every: 150
   gaussian_update_offset: 50

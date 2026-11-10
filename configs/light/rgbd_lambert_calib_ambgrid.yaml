@@ -22,3 +22,7 @@ Light:
   schedule:
     - {after_keyframes: 10, unfreeze: [ambient.c]}
     - {after_keyframes: 20, unfreeze: [ambient.residual]}
+
+Training:
+  # Shading + tracking loss replayed as CUDA graphs (docs/DECISIONS.md D130).
+  cuda_graph_tracking: true
