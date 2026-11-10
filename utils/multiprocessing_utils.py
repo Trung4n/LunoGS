@@ -68,6 +68,18 @@ def stop_process(p):
     return True
 
 
+def move_obj(obj, device):
+    """The tensors (and dicts of tensors) of a clone_obj snapshot moved to
+    `device`, in place; returns obj. For the map sent by a backend running on
+    another GPU (slam.py --backend_gpu, docs/DECISIONS.md D128)."""
+    for attr, value in list(obj.__dict__.items()):
+        if isinstance(value, torch.Tensor):
+            setattr(obj, attr, value.to(device))
+        elif isinstance(value, dict) and value and all(isinstance(v, torch.Tensor) for v in value.values()):
+            setattr(obj, attr, {k: v.to(device) for k, v in value.items()})
+    return obj
+
+
 def clone_obj(obj):
     clone_obj = copy.deepcopy(obj)
     for attr in clone_obj.__dict__.keys():

@@ -25,7 +25,7 @@ from utils.dataset import load_dataset
 from utils.eval_utils import eval_ate, eval_rendering, save_gaussians
 from utils.logging_utils import Log
 from utils.trajectory_analysis import run_report
-from utils.multiprocessing_utils import FakeQueue, drain_queue, stop_process
+from utils.multiprocessing_utils import FakeQueue, drain_queue, move_obj, stop_process
 from utils.record_zip import zip_run
 from utils.run_recorder import read_record_config
 from utils.slam_backend import BackEnd
@@ -181,6 +181,9 @@ class SLAM:
         self.backend.frontend_queue = frontend_queue
         self.backend.backend_queue = backend_queue
         self.backend.live_mode = self.live_mode
+        if "backend_gpu" in self.config["Results"]:
+            # Mapping on its own GPU, tracking on GPU 0 (--backend_gpu, D128).
+            self.backend.device = torch.device(f"cuda:{self.config['Results']['backend_gpu']}")
 
         self.backend.set_hyperparams()
 
@@ -308,7 +311,8 @@ class SLAM:
                         continue
                     data = frontend_queue.get()
                     if data[0] == "sync_backend" and frontend_queue.empty():
-                        gaussians = data[1]
+                        # From the backend's GPU to this process's (D128).
+                        gaussians = move_obj(data[1], self.frontend.device)
                         self.gaussians = gaussians
                         break
                 if self.frontend.recorder is not None:
@@ -452,6 +456,13 @@ if __name__ == "__main__":
         "after) and the color refinement; ATE and trajectory analysis only",
     )
 
+    parser.add_argument(
+        "--backend_gpu",
+        type=int,
+        default=None,
+        help="run the backend (mapping) on this GPU index, e.g. 1 on a 2-GPU "
+        "machine; tracking stays on GPU 0. Default: the same GPU (docs/DECISIONS.md D128)",
+    )
     # Recording for offline replay videos (D76); needs saved results.
     parser.add_argument(
         "--record",
@@ -496,6 +507,14 @@ if __name__ == "__main__":
     if args.skip_render_eval:
         config["Results"]["eval_rendering"] = False
         Log("\teval_rendering=False (--skip_render_eval: ATE only)")
+    if args.backend_gpu is not None:
+        # Set only by --backend_gpu (D128); absent = one GPU, as before.
+        if not 0 <= args.backend_gpu < torch.cuda.device_count():
+            raise ValueError(
+                f"--backend_gpu {args.backend_gpu}: this machine has {torch.cuda.device_count()} GPU(s)"
+            )
+        config["Results"]["backend_gpu"] = args.backend_gpu
+        Log(f"	backend_gpu={args.backend_gpu}")
     if args.record:
         # Recorded in the run's config.yml; the other Results.record keys
         # come from the config.

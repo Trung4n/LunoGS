@@ -6,6 +6,45 @@ from light_models import read_min_gradient
 from utils.slam_utils import image_gradient, image_gradient_mask
 
 
+_BLOCKS = {}
+
+
+def _block_layout(h, w, row, col, device):
+    """For a (h, w) image cut into row x col blocks at round(r * h / row),
+    round(c * w / col): [(block ids, flat pixel indices (n_blocks, block
+    size)) per block size], and the (h, w) block id of every pixel."""
+    key = (h, w, row, col, str(device))
+    if key not in _BLOCKS:
+        row_edges = [round(r * h / row) for r in range(row + 1)]
+        col_edges = [round(c * w / col) for c in range(col + 1)]
+        block_of_pixel = torch.empty(h, w, dtype=torch.long)
+        groups = {}
+        for r in range(row):
+            r0, r1 = row_edges[r], row_edges[r + 1]
+            for c in range(col):
+                c0, c1 = col_edges[c], col_edges[c + 1]
+                b = r * col + c
+                block_of_pixel[r0:r1, c0:c1] = b
+                ys, xs = torch.meshgrid(torch.arange(r0, r1), torch.arange(c0, c1), indexing="ij")
+                groups.setdefault((r1 - r0, c1 - c0), []).append((b, (ys * w + xs).flatten()))
+        layout = [(torch.tensor([b for b, _ in g], device=device),
+                   torch.stack([idx for _, idx in g]).to(device)) for g in groups.values()]
+        _BLOCKS[key] = (layout, block_of_pixel.to(device))
+    return _BLOCKS[key]
+
+
+def _block_medians(image, row, col):
+    """((row * col,) median of each block, (h, w) block id of each pixel) for a
+    (h, w) image; torch.median of each block (the lower middle value)."""
+    h, w = image.shape
+    layout, block_of_pixel = _block_layout(h, w, row, col, image.device)
+    flat = image.flatten()
+    medians = torch.empty(row * col, dtype=image.dtype, device=image.device)
+    for ids, idx in layout:
+        medians[ids] = flat[idx].median(dim=1).values
+    return medians, block_of_pixel
+
+
 class Camera(nn.Module):
     """One video frame plus everything needed to render/optimize it.
 
@@ -231,16 +270,11 @@ class Camera(nn.Module):
             _, h, w = self.original_image.shape
             # Rounded edges so the cells tile the whole image even when h, w
             # are not multiples of row, col.
-            row_edges = [round(r * h / row) for r in range(row + 1)]
-            col_edges = [round(c * w / col) for c in range(col + 1)]
-            grad_mask = torch.zeros_like(img_grad_intensity, dtype=torch.bool)
-            for r in range(row):
-                r0, r1 = row_edges[r], row_edges[r + 1]
-                for c in range(col):
-                    c0, c1 = col_edges[c], col_edges[c + 1]
-                    block = img_grad_intensity[:, r0:r1, c0:c1]
-                    grad_mask[:, r0:r1, c0:c1] = block > block.median() * multiplier
-            self.grad_mask = grad_mask
+            # Each pixel against its own block's median, as the per-block loop
+            # did; blocks of the same size are reduced together (one median
+            # per size instead of 1024 small ones, docs/DECISIONS.md D128).
+            medians, block_of_pixel = _block_medians(img_grad_intensity[0], row, col)
+            self.grad_mask = (img_grad_intensity > (medians * multiplier)[block_of_pixel][None])
         else:
             # Generic case: single global-median threshold over the whole image.
             median_img_grad_intensity = img_grad_intensity.median()
@@ -256,6 +290,23 @@ class Camera(nn.Module):
             self.grad_mask = self.grad_mask & (
                 img_grad_intensity * 255.0 >= min_gradient.threshold_8bit
             )
+
+    def to_device(self, device):
+        """Moves the frame's tensors to `device` (the backend on another GPU,
+        slam.py --backend_gpu, docs/DECISIONS.md D128). The pose deltas and
+        exposure stay leaf Parameters (their optimizers are built after)."""
+        self.device = device
+        for name in ("original_image", "grad_mask", "R", "T", "R_gt", "T_gt", "projection_matrix"):
+            value = getattr(self, name, None)
+            if torch.is_tensor(value):
+                setattr(self, name, value.to(device))
+        for name in ("cam_rot_delta", "cam_trans_delta", "exposure_a", "exposure_b"):
+            value = getattr(self, name, None)
+            if value is not None:
+                setattr(self, name, nn.Parameter(value.detach().to(device), requires_grad=value.requires_grad))
+        self.frame_cache = None
+        self._matrix_cache = None
+        return self
 
     def clean(self):
         # Explicitly drop references to this frame's heavy CUDA tensors

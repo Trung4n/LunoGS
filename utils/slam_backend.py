@@ -43,6 +43,8 @@ class BackEnd(mp.Process):
         self.pipeline_params = None
         self.opt_params = None  # 3DGS optimizer/densification hyperparameters
         self.background = None
+        # GPU of this process (slam.py --backend_gpu, D128); None = the default.
+        self.device = None
         # Optimizer of the learnable light parameters, built in run() (D60).
         self.light_learner = None
         # self.shader is also set from slam.py, deliberately NOT initialized
@@ -656,6 +658,31 @@ class BackEnd(mp.Process):
                 self.gaussians.update_learning_rate(iteration)
         Log("Map refinement done")
 
+    def use_device(self):
+        """Runs this process on self.device (slam.py --backend_gpu, D128):
+        "cuda" then means that GPU, the still empty map is rebuilt there and
+        every frame received is moved there. None = the default GPU, as
+        before."""
+        if self.device is None:
+            return
+        torch.cuda.set_device(self.device)
+        old = self.gaussians
+        if old.get_xyz.shape[0] != 0:
+            raise RuntimeError("the backend can only change GPU before the map has Gaussians")
+        gaussians = GaussianModel(old.max_sh_degree, config=self.config)
+        gaussians.init_lr(old.spatial_lr_scale)
+        if self.shader is not None:
+            gaussians.declare_extras(self.shader.per_gaussian_params())
+        gaussians.training_setup(self.opt_params)
+        self.gaussians = gaussians
+        self.background = self.background.to(self.device)
+
+    def on_device(self, viewpoint):
+        # A frame sent by the frontend, moved to this process's GPU if needed.
+        if self.device is not None:
+            viewpoint.to_device(self.device)
+        return viewpoint
+
     def push_to_frontend(self, tag=None):
         # Sends [tag, map copy, window visibility, window keyframe poses] to
         # the frontend (applied there by FrontEnd.sync_backend). The map is
@@ -679,6 +706,7 @@ class BackEnd(mp.Process):
     def run(self):
         # Process entry point. Messages take priority; when the queue is empty
         # the backend keeps refining the current window.
+        self.use_device()
         self.start_light_learning()
         # Background mapping since the last keyframe (timing log, D79).
         bg_iters, bg_ms = 0, 0.0
@@ -733,7 +761,7 @@ class BackEnd(mp.Process):
                     # From FrontEnd.request_init: start a new map from one
                     # frame (at its GT pose).
                     cur_frame_idx = data[1]
-                    viewpoint = data[2]
+                    viewpoint = self.on_device(data[2])
                     depth_map = data[3]
                     Log("Resetting the system")
                     self.reset()
@@ -758,7 +786,7 @@ class BackEnd(mp.Process):
                     # adopt the frontend's new window, add its Gaussians, map,
                     # prune, reply.
                     cur_frame_idx = data[1]
-                    viewpoint = data[2]
+                    viewpoint = self.on_device(data[2])
                     current_window = data[3]
                     depth_map = data[4]
                     log_timing(save_dir, "background", cur_frame_idx, bg_ms, bg_iters)

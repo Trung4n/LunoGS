@@ -606,12 +606,6 @@ renderCUDA(
 	__shared__ float collected_colors[C * BLOCK_SIZE];
 	__shared__ float collected_depths[BLOCK_SIZE];
 
-	__shared__ float2 dL_dmean2D_shared[BLOCK_SIZE];
-	__shared__ float3 dL_dcolors_shared[BLOCK_SIZE];
-	__shared__ float dL_ddepths_shared[BLOCK_SIZE];
-	__shared__ float dL_dopacity_shared[BLOCK_SIZE];
-	__shared__ float4 dL_dconic2D_shared[BLOCK_SIZE];
-
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors. 
 	const float T_final = inside ? final_Ts[pix_id] : 0;
@@ -642,14 +636,29 @@ renderCUDA(
 	// screen-space viewport corrdinates (-1 to 1)
 	const float ddelx_dx = 0.5f * W;
 	const float ddely_dy = 0.5f * H;
-	__shared__ int skip_counter;
+
+	float bg_dot_dpixel = 0.f;
+	#pragma unroll
+	for (int i = 0; i < C; i++) {
+		bg_dot_dpixel +=  bg_color[i] * dL_dpixel[i];
+	}
+
+	// Per-Gaussian sums are reduced within each warp (shuffles, no block
+	// barrier) and added with one atomic per warp. The original summed the
+	// whole block per Gaussian (~10 block barriers each) and skipped a
+	// Gaussian only when all 256 pixels skipped it (docs/DECISIONS.md D129).
+	// Same values up to the order of the float additions, which the atomics
+	// already left undetermined. Every thread of the block reaches the
+	// warp collectives: pixels outside the image only carry zeros.
+	const unsigned FULL_MASK = 0xffffffffu;
+	const bool warp_leader = (tid % 32) == 0;
 
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
 		// Load auxiliary data into shared memory, start in the BACK
 		// and load them in revers order.
-		// block.sync();
+		block.sync();
 		const int progress = i * BLOCK_SIZE + tid;
 		if (range.x + progress < range.y)
 		{
@@ -664,13 +673,8 @@ renderCUDA(
 			}
 			collected_depths[tid] = depths[coll_id];
 		}
+		block.sync();
 		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++) {
-			block.sync();
-			if (tid == 0) {
-				skip_counter = 0;
-			}
-			block.sync();
-
 			// Keep track of current Gaussian ID. Skip, if this one
 			// is behind the last contributor for this pixel.
 			bool skip = done;
@@ -688,14 +692,9 @@ renderCUDA(
 			const float alpha = min(0.99f, con_o.w * G);
 			skip |= alpha < 1.0f / 255.0f;
 
-			if (skip) {
-				atomicAdd(&skip_counter, 1);
-			}
-			block.sync();
-			if (skip_counter == BLOCK_SIZE) {
+			if (__all_sync(FULL_MASK, skip)) {
 				continue;
 			}
-
 
 			T = skip ? T : T / (1.f - alpha);
 			const float dchannel_dcolor = alpha * T;
@@ -718,15 +717,12 @@ renderCUDA(
 				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
 				local_dL_dcolors[ch] = skip ? 0.0f : dchannel_dcolor * dL_dchannel;
 			}
-			dL_dcolors_shared[tid].x = local_dL_dcolors[0];
-			dL_dcolors_shared[tid].y = local_dL_dcolors[1];
-			dL_dcolors_shared[tid].z = local_dL_dcolors[2];
 
 			const float depth = collected_depths[j];
 			accum_rec_depth = skip ? accum_rec_depth : last_alpha * last_depth + (1.f - last_alpha) * accum_rec_depth;
 			last_depth = skip ? last_depth : depth;
 			dL_dalpha += (depth - accum_rec_depth) * dL_dpixel_depth;
-			dL_ddepths_shared[tid] = skip ? 0.f : dchannel_dcolor * dL_dpixel_depth;
+			float local_dL_ddepth = skip ? 0.f : dchannel_dcolor * dL_dpixel_depth;
 
 
 			dL_dalpha *= T;
@@ -735,11 +731,6 @@ renderCUDA(
 
 			// Account for fact that alpha also influences how much of
 			// the background color is added if nothing left to blend
-			float bg_dot_dpixel = 0.f;
-			#pragma unroll
-			for (int i = 0; i < C; i++) {
-				bg_dot_dpixel +=  bg_color[i] * dL_dpixel[i];
-			}
 			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
 
 			// Helpful reusable temporary variables
@@ -749,38 +740,36 @@ renderCUDA(
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
 			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-			dL_dmean2D_shared[tid].x = skip ? 0.f : dL_dG * dG_ddelx * ddelx_dx;
-			dL_dmean2D_shared[tid].y = skip ? 0.f : dL_dG * dG_ddely * ddely_dy;
-			dL_dconic2D_shared[tid].x = skip ? 0.f : -0.5f * gdx * d.x * dL_dG;
-			dL_dconic2D_shared[tid].y = skip ? 0.f : -0.5f * gdx * d.y * dL_dG;
-			dL_dconic2D_shared[tid].w = skip ? 0.f : -0.5f * gdy * d.y * dL_dG;
-			dL_dopacity_shared[tid] = skip ? 0.f : G * dL_dalpha;
+			float v[10];
+			v[0] = skip ? 0.f : dL_dG * dG_ddelx * ddelx_dx;
+			v[1] = skip ? 0.f : dL_dG * dG_ddely * ddely_dy;
+			v[2] = skip ? 0.f : -0.5f * gdx * d.x * dL_dG;
+			v[3] = skip ? 0.f : -0.5f * gdx * d.y * dL_dG;
+			v[4] = skip ? 0.f : -0.5f * gdy * d.y * dL_dG;
+			v[5] = skip ? 0.f : G * dL_dalpha;
+			v[6] = local_dL_dcolors[0];
+			v[7] = local_dL_dcolors[1];
+			v[8] = local_dL_dcolors[2];
+			v[9] = local_dL_ddepth;
+			#pragma unroll
+			for (int k = 0; k < 10; k++) {
+				#pragma unroll
+				for (int offset = 16; offset > 0; offset /= 2) {
+					v[k] += __shfl_down_sync(FULL_MASK, v[k], offset);
+				}
+			}
 
-			render_cuda_reduce_sum(block, 
-				dL_dmean2D_shared,
-				dL_dconic2D_shared,
-				dL_dopacity_shared,
-				dL_dcolors_shared, 
-				dL_ddepths_shared
-			);	
-			
-			if (tid == 0) {
-				float2 dL_dmean2D_acc = dL_dmean2D_shared[0];
-				float4 dL_dconic2D_acc = dL_dconic2D_shared[0];
-				float dL_dopacity_acc = dL_dopacity_shared[0];
-				float3 dL_dcolors_acc = dL_dcolors_shared[0];
-				float dL_ddepths_acc = dL_ddepths_shared[0];
-
-				atomicAdd(&dL_dmean2D[global_id].x, dL_dmean2D_acc.x);
-				atomicAdd(&dL_dmean2D[global_id].y, dL_dmean2D_acc.y);
-				atomicAdd(&dL_dconic2D[global_id].x, dL_dconic2D_acc.x);
-				atomicAdd(&dL_dconic2D[global_id].y, dL_dconic2D_acc.y);
-				atomicAdd(&dL_dconic2D[global_id].w, dL_dconic2D_acc.w);
-				atomicAdd(&dL_dopacity[global_id], dL_dopacity_acc);
-				atomicAdd(&dL_dcolors[global_id * C + 0], dL_dcolors_acc.x);
-				atomicAdd(&dL_dcolors[global_id * C + 1], dL_dcolors_acc.y);
-				atomicAdd(&dL_dcolors[global_id * C + 2], dL_dcolors_acc.z);
-				atomicAdd(&dL_ddepths[global_id], dL_ddepths_acc);
+			if (warp_leader) {
+				atomicAdd(&dL_dmean2D[global_id].x, v[0]);
+				atomicAdd(&dL_dmean2D[global_id].y, v[1]);
+				atomicAdd(&dL_dconic2D[global_id].x, v[2]);
+				atomicAdd(&dL_dconic2D[global_id].y, v[3]);
+				atomicAdd(&dL_dconic2D[global_id].w, v[4]);
+				atomicAdd(&dL_dopacity[global_id], v[5]);
+				atomicAdd(&dL_dcolors[global_id * C + 0], v[6]);
+				atomicAdd(&dL_dcolors[global_id * C + 1], v[7]);
+				atomicAdd(&dL_dcolors[global_id * C + 2], v[8]);
+				atomicAdd(&dL_ddepths[global_id], v[9]);
 			}
 		}
 	}

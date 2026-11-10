@@ -10,7 +10,7 @@ from gui import gui_utils
 from utils.camera_utils import Camera, build_projection_matrix
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
-from utils.multiprocessing_utils import FakeQueue, clone_obj, raise_if_dead
+from utils.multiprocessing_utils import FakeQueue, clone_obj, move_obj, raise_if_dead
 from utils.perf import FramePrefetcher, TimeBudget
 from utils.config_utils import require_key
 
@@ -528,8 +528,10 @@ class FrontEnd(mp.Process):
         # overwrites the poses of the window's keyframes with the
         # BA-refined ones. Frames tracked after those keyframes are NOT
         # corrected retroactively.
-        self.gaussians = data[1]
-        occ_aware_visibility = data[2]
+        # The backend may run on another GPU (slam.py --backend_gpu, D128):
+        # its map and covisibility come back to this process's device.
+        self.gaussians = move_obj(data[1], self.device)
+        occ_aware_visibility = {k: v.to(self.device) for k, v in data[2].items()}
         keyframes = data[3]
         self.occ_aware_visibility = occ_aware_visibility
         if self.shader is not None:

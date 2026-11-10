@@ -226,3 +226,53 @@ def test_surface_points_with_no_coverage_stay_finite():
     g = {"depth": torch.full((1, 4, 4), 0.2), "opacity": torch.full((1, 4, 4), 0.1), "pixel_offset": 0.5}
     points, valid = surface_points(g, cam, 0.5)  # covered, none trusted: z = depth / opacity
     torch.testing.assert_close(points[2], torch.full((4, 4), 2.0))
+
+
+# ---------------------------------------------------------------- gradient mask
+
+
+@pytest.mark.parametrize("h,w", [(680, 1200), (48, 64), (37, 50)])
+def test_block_medians_match_the_per_block_loop(h, w):
+    from utils.camera_utils import _block_medians
+
+    torch.manual_seed(0)
+    img = torch.rand(h, w)
+    img[: h // 3] = torch.round(img[: h // 3] * 4) / 4  # ties
+    medians, block_of_pixel = _block_medians(img, 32, 32)
+    rows = [round(r * h / 32) for r in range(33)]
+    cols = [round(c * w / 32) for c in range(33)]
+    for r in range(32):
+        for c in range(32):
+            block = img[rows[r]:rows[r + 1], cols[c]:cols[c + 1]]
+            if block.numel() == 0:
+                continue
+            assert medians[r * 32 + c] == block.median()
+            assert (block_of_pixel[rows[r]:rows[r + 1], cols[c]:cols[c + 1]] == r * 32 + c).all()
+
+
+# ---------------------------------------------------------------- backend on another GPU
+
+
+def test_camera_to_device_moves_every_tensor_and_keeps_leaf_parameters():
+    r, t = _rotation([0, 0, 1], 15), torch.tensor([0.1, 0.2, 0.3])
+    cam = _camera(r, t)
+    cam.original_image = torch.rand(3, 4, 5)
+    cam.grad_mask = torch.ones(1, 4, 5, dtype=torch.bool)
+    wv = cam.world_view_transform.clone()
+    dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    cam.to_device(dev)
+    for name in ("original_image", "grad_mask", "R", "T", "R_gt", "T_gt", "projection_matrix",
+                 "cam_rot_delta", "cam_trans_delta", "exposure_a", "exposure_b"):
+        assert getattr(cam, name).device.type == dev.type, name
+    assert isinstance(cam.cam_rot_delta, torch.nn.Parameter) and cam.cam_rot_delta.is_leaf
+    torch.testing.assert_close(cam.world_view_transform.cpu(), wv)
+    cam.update_RT(r, t)  # host tensors land on the camera's new device
+    assert cam.R.device.type == dev.type
+
+
+def test_move_obj_moves_tensors_and_tensor_dicts():
+    from utils.multiprocessing_utils import move_obj
+
+    obj = SimpleNamespace(a=torch.ones(2), extras={"r": torch.zeros(3)}, n=5, empty={})
+    move_obj(obj, torch.device("cpu"))
+    assert obj.n == 5 and obj.extras["r"].shape == (3,) and obj.empty == {}
