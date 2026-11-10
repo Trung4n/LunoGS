@@ -1,0 +1,7 @@
+# Accuracy check of the main model (docs/DECISIONS.md D132): 20 mapping iterations
+# per new keyframe instead of 10, to give back the map refinement that a faster
+# frontend leaves the background mapping.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0_parallel.yaml"
+
+Training:
+  keyframe_mapping_itr_num: 20

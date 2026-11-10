@@ -12,6 +12,7 @@ from light_models.profile_bootstrap import bootstrap_spline
 from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
+from utils.config_utils import require_key
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj, drain_queue
 from utils.pose_utils import update_pose
@@ -114,6 +115,11 @@ class BackEnd(mp.Process):
         # --- regular mapping (map) ---
         # iterations per keyframe (no background mapping / during mono init)
         self.mapping_itr_num = self.config["Training"]["mapping_itr_num"]
+        # Mapping iterations per new keyframe when the backend also maps in
+        # the background (sync_mode parallel / hybrid); MonoGS wrote 10 here
+        # (docs/DECISIONS.md D132).
+        self.keyframe_mapping_itr_num = require_key(
+            self.config["Training"], "keyframe_mapping_itr_num", "Training")
         # densify/prune when iteration_count % every == offset
         self.gaussian_update_every = self.config["Training"]["gaussian_update_every"]
         self.gaussian_update_offset = self.config["Training"]["gaussian_update_offset"]
@@ -807,7 +813,8 @@ class BackEnd(mp.Process):
                     # With background mapping: only 10 iterations here, the
                     # background loop keeps mapping afterwards. Without: the
                     # full mapping_itr_num, since nothing runs in between.
-                    iter_per_kf = 10 if self.background_mapping else self.mapping_itr_num
+                    iter_per_kf = (self.keyframe_mapping_itr_num if self.background_mapping
+                                   else self.mapping_itr_num)
                     if not self.initialized:
                         # Monocular initialization phase.
                         if (

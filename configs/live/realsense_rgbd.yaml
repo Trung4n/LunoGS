@@ -64,6 +64,12 @@ Training:
   # Shading + tracking loss replayed as CUDA graphs (light model only,
   # same values, fewer kernel launches; docs/DECISIONS.md D130).
   cuda_graph_tracking: false
+  # Tracking pose update: host (float64 on the CPU) or device (float32 on
+  # the GPU, original MonoGS); docs/DECISIONS.md D132.
+  tracking_pose_update: host
+  # Mapping iterations per new keyframe with background mapping (sync_mode
+  # parallel / hybrid); MonoGS had 10 written in the code (D132).
+  keyframe_mapping_itr_num: 10
   mapping_itr_num: 50
   gaussian_update_every: 150
   gaussian_update_offset: 50

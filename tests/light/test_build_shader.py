@@ -240,6 +240,8 @@ def test_light_config_set():
         "rgbd_lambert_calib_ambgrid_cell0p64.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p8.yaml",
         "rgbd_lambert_calib_ambgrid_cell1p0_parallel.yaml",
+        "rgbd_lambert_calib_ambgrid_cell1p0_parallel_posegpu.yaml",
+        "rgbd_lambert_calib_ambgrid_cell1p0_parallel_kfmap20.yaml",
         "rgbd_lambert_selfcal_tcl_ruler.yaml",
         "rgbd_lambert_selfcal_tcl_zero.yaml",
         "rgbd_lambert_selfcal_tcl_xy.yaml",

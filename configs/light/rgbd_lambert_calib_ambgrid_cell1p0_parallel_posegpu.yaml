@@ -1,0 +1,6 @@
+# Accuracy check of the main model (docs/DECISIONS.md D132): tracking pose update
+# as in original MonoGS (float32 on the GPU) instead of float64 on the CPU.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0_parallel.yaml"
+
+Training:
+  tracking_pose_update: device

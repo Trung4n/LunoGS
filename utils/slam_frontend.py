@@ -16,7 +16,7 @@ from utils.config_utils import require_key
 
 # Training.motion_model values (D128).
 MOTION_MODELS = ("none", "constant_velocity")
-from utils.pose_utils import update_pose_host
+from utils.pose_utils import update_pose, update_pose_host
 from utils.run_recorder import open_recorder
 from light_models.diagnostics import log_pixel_usage, log_timing
 from utils.slam_utils import get_loss_tracking, get_median_depth, pixel_usage_stats
@@ -117,6 +117,12 @@ class FrontEnd(mp.Process):
         # tracking_itr_num: max optimizer steps per frame (stops early on
         # convergence, see tracking()).
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
+        # Tracking pose update (D132): "host" = update_pose_host (float64 on the
+        # CPU, at the iteration's sync), "device" = update_pose as in MonoGS.
+        mode = require_key(self.config["Training"], "tracking_pose_update", "Training")
+        if mode not in ("host", "device"):
+            raise ValueError(f"Training.tracking_pose_update must be host or device, got {mode!r}")
+        self.pose_update = update_pose_host if mode == "host" else update_pose
         # Initial pose of a frame before tracking (D128), see initial_pose().
         self.motion_model = require_key(self.config["Training"], "motion_model", "Training")
         if self.motion_model not in MOTION_MODELS:
@@ -317,7 +323,7 @@ class FrontEnd(mp.Process):
                 # Adam moves the pose delta, update_pose folds it into R/T
                 # (see pose_utils.update_pose).
                 pose_optimizer.step()
-                converged = update_pose_host(viewpoint)
+                converged = self.pose_update(viewpoint)
 
             # Live GUI update, every 10 iterations.
             if gui and tracking_itr % 10 == 0:
