@@ -10,6 +10,7 @@ import weakref
 import torch
 
 _COPIES = {}  # id(tensor) -> (weakref to tensor, key, copy)
+_GRAD_COPIES = {}  # id(tensor) -> (weakref to tensor, key, differentiable copy)
 
 
 def on_device(t, device, dtype):
@@ -17,7 +18,7 @@ def on_device(t, device, dtype):
     if t.device == device and t.dtype == dtype:
         return t
     if t.requires_grad and torch.is_grad_enabled():
-        return t.to(device, dtype)
+        return _grad_copy(t, device, dtype)
     key = (t._version, str(device), dtype)
     entry = _COPIES.get(id(t))
     if entry is not None and entry[0]() is t:
@@ -36,4 +37,29 @@ def on_device(t, device, dtype):
         for k in [k for k, e in _COPIES.items() if e[0]() is None]:
             del _COPIES[k]
     _COPIES[id(t)] = (weakref.ref(t), key, copy)
+    return copy
+
+
+def _grad_copy(t, device, dtype):
+    """t.to(device, dtype) for a parameter being learned (mapping renders the
+    window's views one after the other): one copy, hence one host-to-device
+    and one device-to-host gradient copy, for all the renders of one backward
+    instead of one per render (D131). The copy is dropped as soon as a
+    backward pass reaches it (its autograd graph is freed then) or the
+    parameter changes (optimizer step)."""
+    key = (t._version, str(device), dtype)
+    entry = _GRAD_COPIES.get(id(t))
+    if entry is not None and entry[0]() is t and entry[1] == key:
+        return entry[2]
+    copy = t.to(device, dtype)
+    ident = id(t)
+
+    def spent(grad):
+        held = _GRAD_COPIES.get(ident)
+        if held is not None and held[2] is copy:
+            del _GRAD_COPIES[ident]
+        return grad
+
+    copy.register_hook(spent)
+    _GRAD_COPIES[ident] = (weakref.ref(t), key, copy)
     return copy

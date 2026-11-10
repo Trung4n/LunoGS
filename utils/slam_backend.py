@@ -544,9 +544,11 @@ class BackEnd(mp.Process):
 
                 # Densification statistics from all rendered views.
                 for idx in range(len(viewspace_point_tensor_acm)):
-                    self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
-                        self.gaussians.max_radii2D[visibility_filter_acm[idx]],
-                        radii_acm[idx][visibility_filter_acm[idx]],
+                    # torch.where: same values without boolean indexing (D131).
+                    self.gaussians.max_radii2D = torch.where(
+                        visibility_filter_acm[idx],
+                        torch.max(self.gaussians.max_radii2D, radii_acm[idx]),
+                        self.gaussians.max_radii2D,
                     )
                     self.gaussians.add_densification_stats(
                         viewspace_point_tensor_acm[idx], visibility_filter_acm[idx]
@@ -681,6 +683,9 @@ class BackEnd(mp.Process):
         # A frame sent by the frontend, moved to this process's GPU if needed.
         if self.device is not None:
             viewpoint.to_device(self.device)
+        # Constants of the keyframe's observation (sensor depth and normals,
+        # masks) built once, not at every mapping render (D131).
+        viewpoint.frame_cache = {}
         return viewpoint
 
     def push_to_frontend(self, tag=None):

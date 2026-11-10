@@ -302,8 +302,10 @@ class FrontEnd(mp.Process):
             else:
                 # Shading + loss replayed as CUDA graphs (D130); the frame's
                 # first iteration runs them eagerly to fill its buffers.
+                # Recorded again only when the shader's Python state changes
+                # (warm-ups), not at every keyframe (D131).
                 loss_tracking, render_pkg = graphed.step(
-                    render_pkg, viewpoint, len(self.kf_indices), eager=tracking_itr == 0)
+                    render_pkg, viewpoint, self.shader.graph_state(), eager=tracking_itr == 0)
             image, depth, opacity = (
                 render_pkg["render"],
                 render_pkg["depth"],

@@ -417,10 +417,12 @@ def get_loss_mapping_rgbd(config, image, gt_image, depth, viewpoint, pixel_weigh
 
     observed = viewpoint.original_image.cuda()
 
-    gt_depth = torch.from_numpy(viewpoint.depth).to(
+    gt_depth = frame_constant(viewpoint, "sensor_depth", lambda: torch.from_numpy(viewpoint.depth).to(
         dtype=torch.float32, device=image.device
-    )[None]
-    rgb_pixel_mask = (observed.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
+    )[None])
+    rgb_pixel_mask = frame_constant(
+        viewpoint, "mapping_rgb_mask",
+        lambda: (observed.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape))
     if pixel_weight is not None:
         rgb_pixel_mask = rgb_pixel_mask * pixel_weight
     depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)

@@ -189,6 +189,17 @@ class ColocatedShader:
         ])
         return torch.linalg.matrix_exp(skew) @ axis
 
+    def graph_state(self):
+        """Every Python value that decides which kernels shading runs: a
+        recorded CUDA graph stays valid while this tuple is unchanged
+        (utils/graphed_tracking.py, D131). Components without such state
+        contribute None."""
+        state = []
+        for comp in (self.falloff, self.angular, self.cosine, self.ambient):
+            get = getattr(comp, "graph_state", None)
+            state.append(get() if get is not None else None)
+        return tuple(state)
+
     def set_keyframe_count(self, n):
         # Keyframes currently in the map, reported by FrontEnd / BackEnd
         # before each step; only components with a warm-up use it (D43, and

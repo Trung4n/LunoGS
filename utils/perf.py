@@ -30,7 +30,10 @@ def frame_constant(camera, key, build):
         if pool is not None:
             # Static buffers shared by all frames (CUDA graph replay, D130):
             # the new frame's values are copied into the same memory.
-            value = tuple(_pooled(pool, (key, i), v) for i, v in enumerate(value))                 if isinstance(value, tuple) else _pooled(pool, key, value)
+            if isinstance(value, tuple):
+                value = tuple(_pooled(pool, (key, i), v) for i, v in enumerate(value))
+            else:
+                value = _pooled(pool, key, value)
         cache[key] = value
     return cache[key]
 

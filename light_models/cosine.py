@@ -63,6 +63,10 @@ class Lambert:
     def set_keyframe_count(self, n):
         self.active = n > self.warmup_keyframes
 
+    def graph_state(self):
+        # The Python state that changes which kernels __call__ runs (D131).
+        return self.active
+
     def __call__(self, points, valid, to_light, gbuffer, camera):
         if not self.active:
             # Warm-up: no n . l, and no cos map (the loss sees no pixel weight).

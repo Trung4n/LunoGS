@@ -144,6 +144,10 @@ class PerGaussian(MultiplicativeConst):
     def residual_active(self):
         return self._n_keyframes is None or self._n_keyframes > self.residual_after_keyframes
 
+    def graph_state(self):
+        # The Python state that changes which kernels __call__ runs (D131).
+        return self.residual_active()
+
     def per_gaussian_params(self):
         """{extra name: (values per Gaussian, Adam learning rate)}; new
         Gaussians start at 0, i.e. at the global level c."""

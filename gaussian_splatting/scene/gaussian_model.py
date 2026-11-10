@@ -987,7 +987,9 @@ class GaussianModel:
         # Gaussian visible in that view, add the norm of the gradient of its
         # projected 2D position (from render()'s dummy "viewspace_points"
         # tensor) and count one more view.
-        self.xyz_gradient_accum[update_filter] += torch.norm(
-            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
-        )
-        self.denom[update_filter] += 1
+        # torch.where instead of boolean indexing (which synchronizes with the
+        # GPU); same values (D131).
+        keep = update_filter.view(-1, 1)
+        norm = torch.norm(viewspace_point_tensor.grad[:, :2], dim=-1, keepdim=True)
+        self.xyz_gradient_accum += torch.where(keep, norm, torch.zeros_like(norm))
+        self.denom += keep.to(self.denom.dtype)
