@@ -30,12 +30,14 @@ shader's Python state (warm-ups), the binning capacity, the map buffer size.
 Only with the light model and without the exposure affine (as
 cuda_graph_tracking, utils/graphed_tracking.py)."""
 import math
+import time
 
 import torch
 
-from gaussian_splatting.gaussian_renderer import render
+from gaussian_splatting.gaussian_renderer import RASTERIZER_PIXEL_OFFSET, apply_shading, render
 from light_models import read_light_tracking
 from utils.config_utils import require_key
+from utils.logging_utils import Log
 from utils.pose_utils import CONVERGED_THRESHOLD, SE3_exp
 from utils.slam_utils import get_loss_tracking
 
@@ -55,7 +57,7 @@ def read_graph_iteration(config):
         if extra:
             raise ValueError(f"{WHERE}: keys {sorted(extra)} given while disabled")
         return None
-    keys = {"enabled", "check_every", "raster_capacity_margin", "map_capacity_margin"}
+    keys = {"enabled", "check_every", "raster_capacity_margin", "map_capacity_margin", "compile_shading"}
     extra = set(block) - keys
     if extra:
         raise ValueError(f"{WHERE}: unexpected keys {sorted(extra)}")
@@ -68,9 +70,82 @@ def read_graph_iteration(config):
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 1:
             raise ValueError(f"{WHERE}.{name} must be a number > 1, got {v!r}")
         opts[name] = float(v)
+    compile_shading = require_key(block, "compile_shading", WHERE)
+    if not isinstance(compile_shading, bool):
+        raise ValueError(f"{WHERE}.compile_shading must be true or false, got {compile_shading!r}")
+    opts["compile_shading"] = compile_shading
     if require_key(config["Training"], "cuda_graph_tracking", "Training"):
         raise ValueError(f"{WHERE} replaces Training.cuda_graph_tracking: enable only one")
     return opts
+
+
+GBUFFER_KEYS = {"albedo", "depth", "opacity", "pixel_offset"}
+
+
+def lift_constants(gm):
+    """Turns the CUDA tensors a traced graph read from outside (get_attr
+    constants) into extra inputs, in place. Returns them in input order: the
+    caller passes the same tensor objects at every call, so the graph reads
+    their current values (what a CUDA graph replay does too)."""
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    last = placeholders[-1]
+    consts = []
+    lifted = {}  # attribute name -> placeholder
+    for node in list(gm.graph.nodes):
+        if node.op != "get_attr":
+            continue
+        value = getattr(gm, node.target)
+        if not (torch.is_tensor(value) and value.is_cuda):
+            continue  # literals made inside the traced code stay constants
+        if node.target not in lifted:
+            with gm.graph.inserting_after(last):
+                ph = gm.graph.placeholder(f"lifted_{len(consts)}")
+            ph.meta = dict(node.meta)
+            lifted[node.target] = ph
+            consts.append(value)
+            last = ph
+        node.replace_all_uses_with(lifted[node.target])
+        gm.graph.erase_node(node)
+    for name in lifted:
+        delattr(gm, name)
+    gm.graph.lint()
+    gm.recompile()
+    return consts
+
+
+class CompiledShadeLoss:
+    """Shading + tracking loss of the frame being tracked, as a few fused
+    kernels (Training.cuda_graph_iteration.compile_shading, D134).
+
+    Eagerly, shading and loss are hundreds of small kernels, each reading and
+    writing whole images: memory traffic, not arithmetic, sets their time.
+    The eager code is traced once into an aten graph (make_fx). The tensors it
+    reads from outside (the frame's constants in static buffers, the light
+    parameters on the GPU, R and T) sit at fixed addresses, as the CUDA graph
+    requires anyway, and become inputs; the graph is compiled by Inductor,
+    forward and backward. Python decisions made while tracing (component
+    forms, warm-ups) are fixed in the trace, exactly as in a recorded CUDA
+    graph: it is traced again when the shader's graph_state changes."""
+
+    def __init__(self, config, shader, camera, albedo, depth, opacity):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        def shade_loss(a, d, o):
+            gbuffer = {"albedo": a, "depth": d, "opacity": o, "pixel_offset": RASTERIZER_PIXEL_OFFSET}
+            pkg = {"depth": d, "opacity": o}
+            apply_shading(pkg, gbuffer, shader, camera)
+            return get_loss_tracking(config, pkg, camera)
+
+        example = [t.detach() for t in (albedo, depth, opacity)]
+        gm = make_fx(shade_loss)(*example)
+        self.consts = lift_constants(gm)
+        self.fn = torch.compile(gm, dynamic=False)
+        # Compile forward and backward now, outside any CUDA graph capture.
+        leaves = [t.clone().requires_grad_() for t in example]
+        torch.autograd.grad(self(*leaves), leaves)
+
+    def __call__(self, albedo, depth, opacity):
+        return self.fn(albedo, depth, opacity, *self.consts)
 
 
 class _StaticMap:
@@ -152,8 +227,11 @@ class GraphedTrackingLoop:
         self.capacity = 0
         self.graph = None
         self.key = None
+        self.shade = None  # CompiledShadeLoss (compile_shading)
+        self.shade_key = None
         # Statistics for the timing log.
         self.captures = 0
+        self.compiles = 0
         self.reruns = 0
         self.iterations = 0
 
@@ -185,11 +263,24 @@ class GraphedTrackingLoop:
                     if torch.is_tensor(v):
                         v.zero_()
 
-    def _iteration(self, cam, pipe, background, capacity):
-        """One tracking iteration on the static state (eager or recorded)."""
+    def _iteration(self, cam, pipe, background, capacity, shade=None):
+        """One tracking iteration on the static state (eager or recorded).
+        shade: CompiledShadeLoss for shading + loss, None = the eager code."""
+        # Only the pose is optimized: the rasterizer's backward skips the
+        # per-Gaussian colour and opacity sums (D134; view-independent
+        # colours only, the light model's case).
         pkg = render(cam, self.map, pipe, background, shader=self.shader,
-                     raster_capacity=capacity, raster_count=self.count)
-        loss = get_loss_tracking(self.config, pkg, cam)
+                     defer_shading=shade is not None,
+                     raster_capacity=capacity, raster_count=self.count,
+                     raster_pose_only=self.map.active_sh_degree == 0)
+        if shade is None:
+            loss = get_loss_tracking(self.config, pkg, cam)
+        else:
+            gbuffer = pkg["gbuffer"]
+            if set(gbuffer) != GBUFFER_KEYS:
+                raise NotImplementedError(
+                    f"{WHERE}.compile_shading: extra G-buffer rasters {sorted(set(gbuffer) - GBUFFER_KEYS)}")
+            loss = shade(gbuffer["albedo"], gbuffer["depth"], gbuffer["opacity"])
         grads = torch.autograd.grad(loss, self.params)
         for p, g in zip(self.params, grads):
             p.grad = g
@@ -212,13 +303,30 @@ class GraphedTrackingLoop:
             self.rot.zero_()
             self.trans.zero_()
 
+    def _compile_shading(self, cam, pipe, background):
+        """CompiledShadeLoss traced on the current G-buffer (after the frame's
+        eager iteration filled the frame's constants)."""
+        self.shade = None
+        with torch.no_grad():
+            pkg = render(cam, self.map, pipe, background, shader=self.shader, defer_shading=True,
+                         raster_capacity=0, raster_count=self.count)
+        g = pkg["gbuffer"]
+        if set(g) != GBUFFER_KEYS:
+            raise NotImplementedError(
+                f"{WHERE}.compile_shading: extra G-buffer rasters {sorted(set(g) - GBUFFER_KEYS)}")
+        start = time.perf_counter()
+        self.shade = CompiledShadeLoss(self.config, self.shader, cam, g["albedo"], g["depth"], g["opacity"])
+        self.compiles += 1
+        Log(f"shading + tracking loss compiled ({self.compiles}): {time.perf_counter() - start:.1f} s",
+            tag="Light")
+
     def _capture(self, cam, pipe, background):
         self.graph = None
         torch.cuda.synchronize()
         cam._matrix_cache = None  # the pose matrices must be computed in the graph
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, capture_error_mode="thread_local"):
-            self._iteration(cam, pipe, background, self.capacity)
+            self._iteration(cam, pipe, background, self.capacity, self.shade)
         cam._matrix_cache = None
         self.graph = graph
         self.captures += 1
@@ -243,6 +351,10 @@ class GraphedTrackingLoop:
                     if self.graph is None or grown or key != self.key or count > self.capacity:
                         if count > self.capacity:
                             self.capacity = math.ceil(count * o["raster_capacity_margin"])
+                        shade_key = key[:1] + key[2:]  # not the map buffer size
+                        if o["compile_shading"] and (self.shade is None or shade_key != self.shade_key):
+                            self._compile_shading(viewpoint, pipe, background)
+                            self.shade_key = shade_key
                         self._capture(viewpoint, pipe, background)
                         self.key, grown = key, False
                     while remaining > 0:

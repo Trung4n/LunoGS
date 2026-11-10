@@ -47,6 +47,7 @@ def render(
     defer_shading=False,
     raster_capacity=0,
     raster_count=None,
+    raster_pose_only=False,
 ):
     """
     Render the scene.
@@ -157,6 +158,9 @@ def render(
         # original behaviour.
         capacity=raster_capacity,
         num_rendered_out=raster_count,
+        # Backward for the camera pose only (tracking, D134): no per-Gaussian
+        # colour / opacity gradients. Needs sh_degree 0.
+        pose_only=raster_pose_only,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)

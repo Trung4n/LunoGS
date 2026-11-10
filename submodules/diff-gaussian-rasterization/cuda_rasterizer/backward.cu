@@ -561,7 +561,11 @@ __device__ void render_cuda_reduce_sum(group_t g, Lists... lists) {
 
 
 // Backward version of the rendering procedure.
-template <uint32_t C>
+// POSE_ONLY (tracking, D134): only the sums the camera-pose gradient needs
+// (2D mean, conic, depth); the per-Gaussian colour and opacity sums are left
+// out (their outputs stay zero). The kept sums are computed exactly as in the
+// full kernel.
+template <uint32_t C, bool POSE_ONLY>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -741,19 +745,22 @@ renderCUDA(
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
 			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
+			// v[0..5]: mean2D x, y, conic x, y, w, depth (the pose needs
+			// these); v[6..9]: opacity, colours (full kernel only).
+			constexpr int NV = POSE_ONLY ? 6 : 10;
 			float v[10];
 			v[0] = skip ? 0.f : dL_dG * dG_ddelx * ddelx_dx;
 			v[1] = skip ? 0.f : dL_dG * dG_ddely * ddely_dy;
 			v[2] = skip ? 0.f : -0.5f * gdx * d.x * dL_dG;
 			v[3] = skip ? 0.f : -0.5f * gdx * d.y * dL_dG;
 			v[4] = skip ? 0.f : -0.5f * gdy * d.y * dL_dG;
-			v[5] = skip ? 0.f : G * dL_dalpha;
-			v[6] = local_dL_dcolors[0];
-			v[7] = local_dL_dcolors[1];
-			v[8] = local_dL_dcolors[2];
-			v[9] = local_dL_ddepth;
+			v[5] = local_dL_ddepth;
+			v[6] = skip ? 0.f : G * dL_dalpha;
+			v[7] = local_dL_dcolors[0];
+			v[8] = local_dL_dcolors[1];
+			v[9] = local_dL_dcolors[2];
 			#pragma unroll
-			for (int k = 0; k < 10; k++) {
+			for (int k = 0; k < NV; k++) {
 				#pragma unroll
 				for (int offset = 16; offset > 0; offset /= 2) {
 					v[k] += __shfl_down_sync(FULL_MASK, v[k], offset);
@@ -766,11 +773,13 @@ renderCUDA(
 				atomicAdd(&dL_dconic2D[global_id].x, v[2]);
 				atomicAdd(&dL_dconic2D[global_id].y, v[3]);
 				atomicAdd(&dL_dconic2D[global_id].w, v[4]);
-				atomicAdd(&dL_dopacity[global_id], v[5]);
-				atomicAdd(&dL_dcolors[global_id * C + 0], v[6]);
-				atomicAdd(&dL_dcolors[global_id * C + 1], v[7]);
-				atomicAdd(&dL_dcolors[global_id * C + 2], v[8]);
-				atomicAdd(&dL_ddepths[global_id], v[9]);
+				atomicAdd(&dL_ddepths[global_id], v[5]);
+				if (!POSE_ONLY) {
+					atomicAdd(&dL_dopacity[global_id], v[6]);
+					atomicAdd(&dL_dcolors[global_id * C + 0], v[7]);
+					atomicAdd(&dL_dcolors[global_id * C + 1], v[8]);
+					atomicAdd(&dL_dcolors[global_id * C + 2], v[9]);
+				}
 			}
 		}
 	}
@@ -867,9 +876,11 @@ void BACKWARD::render(
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
-	float* dL_ddepths)
+	float* dL_ddepths,
+	bool pose_only)
 {
-	renderCUDA<NUM_CHANNELS> <<<grid, block, 0, c10::cuda::getCurrentCUDAStream()>>>(
+	auto kernel = pose_only ? renderCUDA<NUM_CHANNELS, true> : renderCUDA<NUM_CHANNELS, false>;
+	kernel <<<grid, block, 0, c10::cuda::getCurrentCUDAStream()>>>(
 		ranges,
 		point_list,
 		W, H,

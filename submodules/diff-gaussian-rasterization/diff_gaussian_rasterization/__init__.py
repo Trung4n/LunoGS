@@ -148,7 +148,8 @@ class _RasterizeGaussians(torch.autograd.Function):
                 num_rendered,
                 binningBuffer,
                 imgBuffer,
-                raster_settings.debug)
+                raster_settings.debug,
+                raster_settings.pose_only)
 
         # Compute gradients for relevant tensors by invoking backward method
         if raster_settings.debug:
@@ -205,6 +206,9 @@ class GaussianRasterizationSettings(NamedTuple):
     # num_rendered_out given with capacity 0: the count is written too.
     capacity : int = 0
     num_rendered_out : torch.Tensor = None
+    # Backward for the camera pose only (tracking, D134; sh_degree 0): the
+    # per-Gaussian colour and opacity gradients are not computed (zeros).
+    pose_only : bool = False
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):

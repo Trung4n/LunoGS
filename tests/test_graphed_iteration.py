@@ -15,7 +15,8 @@ def _config(block, shading=False):
     return {"Training": {"cuda_graph_iteration": block, "cuda_graph_tracking": shading}}
 
 
-ON = {"enabled": True, "check_every": 5, "raster_capacity_margin": 1.3, "map_capacity_margin": 1.2}
+ON = {"enabled": True, "check_every": 5, "raster_capacity_margin": 1.3, "map_capacity_margin": 1.2,
+      "compile_shading": False}
 
 
 def test_disabled_gives_none():
@@ -24,10 +25,11 @@ def test_disabled_gives_none():
 
 def test_enabled_reads_every_option():
     assert read_graph_iteration(_config(ON)) == {
-        "check_every": 5, "raster_capacity_margin": 1.3, "map_capacity_margin": 1.2}
+        "check_every": 5, "raster_capacity_margin": 1.3, "map_capacity_margin": 1.2,
+        "compile_shading": False}
 
 
-@pytest.mark.parametrize("drop", ["check_every", "raster_capacity_margin", "map_capacity_margin"])
+@pytest.mark.parametrize("drop", ["check_every", "raster_capacity_margin", "map_capacity_margin", "compile_shading"])
 def test_missing_option_raises(drop):
     block = {k: v for k, v in ON.items() if k != drop}
     with pytest.raises(KeyError):
@@ -114,7 +116,7 @@ def _scene(n=400, seed=0):
     }
 
 
-def _run(dgr, scene, capacity=0, count=None):
+def _run(dgr, scene, capacity=0, count=None, pose_only=False):
     from utils.camera_utils import Camera
 
     h, w, f = 96, 128, 100.0
@@ -125,7 +127,8 @@ def _run(dgr, scene, capacity=0, count=None):
         image_height=h, image_width=w, tanfovx=math.tan(cam.FoVx * 0.5), tanfovy=math.tan(cam.FoVy * 0.5),
         bg=torch.zeros(3, device="cuda"), scale_modifier=1.0, viewmatrix=cam.world_view_transform,
         projmatrix=cam.full_proj_transform, projmatrix_raw=cam.projection_matrix, sh_degree=0,
-        campos=cam.camera_center, prefiltered=False, debug=False, capacity=capacity, num_rendered_out=count)
+        campos=cam.camera_center, prefiltered=False, debug=False, capacity=capacity, num_rendered_out=count,
+        **({"pose_only": True} if pose_only else {}))
     leaves = {k: v.clone().requires_grad_() for k, v in scene.items()}
     means2d = torch.zeros_like(leaves["means3D"], requires_grad=True)
     img, radii, depth, opacity, _ = dgr.GaussianRasterizer(settings)(
@@ -154,6 +157,18 @@ def test_capacity_mode_renders_like_the_default():
         out, returned = _run(dgr, scene, cap, count)
         assert returned == cap and int(count) == num
         _close(ref, out)
+
+
+def test_pose_only_backward_gives_the_same_pose_gradient():
+    dgr = _rasterizer()
+    if "pose_only" not in dgr.GaussianRasterizationSettings._fields:
+        pytest.skip("rasterizer built before D134")
+    scene = _scene()
+    ref, _ = _run(dgr, scene)
+    out, _ = _run(dgr, scene, pose_only=True)
+    _close(ref, out, ["img", "depth", "opacity", "rho", "theta", "d_means3D", "d_scales", "d_rotations"])
+    assert float(out["d_opacities"].abs().max()) == 0.0 and float(out["d_shs"].abs().max()) == 0.0
+    assert float(ref["d_opacities"].abs().max()) > 0.0
 
 
 def test_default_mode_also_writes_the_count():
@@ -187,3 +202,35 @@ def test_negative_opacity_entries_are_skipped():
     _close(ref, out, ["img", "depth", "opacity", "rho", "theta"])
     torch.testing.assert_close(out["d_means3D"][:n], ref["d_means3D"], rtol=1e-4, atol=1e-5)
     assert float(out["d_means3D"][n:].abs().max()) == 0.0
+
+
+# ------------------------------------------------------- traced shading (D134)
+
+def test_lifted_constants_are_read_at_each_call():
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from utils.graphed_iteration import lift_constants
+
+    scale = torch.tensor([2.0, 3.0], device="cuda")  # a static buffer, as in the loop
+    offset = torch.tensor(0.5, device="cuda")
+
+    def fn(x):
+        return ((x * scale + offset) ** 2).sum() + torch.tensor(1.0)  # literal stays inside
+
+    x = torch.ones(2, device="cuda")
+    gm = make_fx(fn)(x)
+    consts = lift_constants(gm)
+    assert any(c is scale for c in consts) and any(c is offset for c in consts)
+    assert not any(n.op == "get_attr" and torch.is_tensor(getattr(gm, n.target)) and getattr(gm, n.target).is_cuda
+                   for n in gm.graph.nodes)
+    torch.testing.assert_close(gm(x, *consts), fn(x))
+    with torch.no_grad():  # new values in the same memory, as the loop writes them
+        scale.mul_(-1.5)
+        offset.fill_(0.25)
+    torch.testing.assert_close(gm(x, *consts), fn(x))
+    xg = x.clone().requires_grad_()
+    g1, = torch.autograd.grad(gm(xg, *consts), xg)
+    g2, = torch.autograd.grad(fn(xg), xg)
+    torch.testing.assert_close(g1, g2)

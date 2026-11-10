@@ -1,0 +1,10 @@
+# Speed (docs/DECISIONS.md D134): rgbd_lambert_calib_ambgrid_cell1p0_parallel_itergraph.yaml
+# with shading + tracking loss traced and compiled by Inductor into a few
+# fused kernels (Triton: needs a GPU of compute capability >= 7.0, e.g. T4,
+# and a C compiler). Compiling takes some seconds, again whenever the
+# shader's warm-up state changes.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0_parallel_itergraph.yaml"
+
+Training:
+  cuda_graph_iteration:
+    compile_shading: true

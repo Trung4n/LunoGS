@@ -198,10 +198,11 @@ def _linear_in_cos(cos_knots, values, cos_theta):
     knot order, i.e. decreasing); beyond the last knot the last value."""
     dev, dt = cos_theta.device, cos_theta.dtype
     # Ascending cos (descending theta) for bucketize.
-    # Bounds read on the CPU copy: float() of a GPU value synchronizes (D128).
-    c = cos_theta.clamp(min=float(cos_knots.min()), max=float(cos_knots.max()))
     a = on_device(cos_knots, dev, dt).flip(0)
     va = on_device(values, dev, dt).flip(0)
+    # Bounds as tensors on the device, the knots being strictly decreasing:
+    # a[0] = min, a[-1] = max. No host value (D128), and traceable (D134).
+    c = cos_theta.clamp(min=a[0], max=a[-1])
     hi = torch.bucketize(c.detach(), a).clamp(1, a.numel() - 1)
     lo = hi - 1
     t = (c - a[lo]) / (a[hi] - a[lo])
