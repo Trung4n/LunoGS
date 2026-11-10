@@ -45,6 +45,17 @@ def rasterize_gaussians(
         raster_settings,
     )
 
+_EMPTY_INT = {}
+
+
+def _count_tensor(raster_settings):
+    if raster_settings.num_rendered_out is not None:
+        return raster_settings.num_rendered_out
+    dev = raster_settings.bg.device
+    if dev not in _EMPTY_INT:
+        _EMPTY_INT[dev] = torch.empty(0, dtype=torch.int32, device=dev)
+    return _EMPTY_INT[dev]
+
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -84,6 +95,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.campos,
             raster_settings.prefiltered,
             raster_settings.debug,
+            raster_settings.capacity,
+            _count_tensor(raster_settings),
         )
 
         # Invoke C++/CUDA rasterizer
@@ -184,6 +197,14 @@ class GaussianRasterizationSettings(NamedTuple):
     campos : torch.Tensor
     prefiltered : bool
     debug : bool
+    # Capacity mode (D133): with capacity > 0 the binning buffers hold
+    # `capacity` entries and the forward does not copy the true count to the
+    # host (no CPU wait, recordable in a CUDA graph). The true count is written
+    # to num_rendered_out (int32 CUDA tensor, one element); entries beyond
+    # capacity are dropped, so the caller must check count <= capacity.
+    # num_rendered_out given with capacity 0: the count is written too.
+    capacity : int = 0
+    num_rendered_out : torch.Tensor = None
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):

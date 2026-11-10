@@ -1,3 +1,4 @@
+#include <c10/cuda/CUDAStream.h>
 /*
  * Copyright (C) 2023, Inria
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
@@ -189,6 +190,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// this Gaussian will not be processed further.
 	radii[idx] = 0;
 	tiles_touched[idx] = 0;
+
+	// Padding entries of a fixed-size map buffer (CUDA graph replay, D133)
+	// carry a negative opacity: skipped like culled Gaussians. Real opacities
+	// are sigmoids, never negative.
+	if (opacities[idx] < 0.f)
+		return;
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
@@ -408,7 +415,7 @@ void FORWARD::render(
 	float* out_opacity,
 	int* n_touched)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+	renderCUDA<NUM_CHANNELS> <<<grid, block, 0, c10::cuda::getCurrentCUDAStream()>>> (
 		ranges,
 		point_list,
 		W, H,
@@ -451,7 +458,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
-	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
+	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256, 0, c10::cuda::getCurrentCUDAStream()>>> (
 		P, D, M,
 		means3D,
 		scales,

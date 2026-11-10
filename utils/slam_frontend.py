@@ -16,6 +16,7 @@ from utils.config_utils import require_key
 
 # Training.motion_model values (D128).
 MOTION_MODELS = ("none", "constant_velocity")
+from utils.graphed_iteration import read_graph_iteration
 from utils.pose_utils import update_pose, update_pose_host
 from utils.run_recorder import open_recorder
 from light_models.diagnostics import log_pixel_usage, log_timing
@@ -123,6 +124,8 @@ class FrontEnd(mp.Process):
         if mode not in ("host", "device"):
             raise ValueError(f"Training.tracking_pose_update must be host or device, got {mode!r}")
         self.pose_update = update_pose_host if mode == "host" else update_pose
+        # Whole tracking iteration as one CUDA graph (D133), None when off.
+        self.graph_iteration = read_graph_iteration(self.config)
         # Initial pose of a frame before tracking (D128), see initial_pose().
         self.motion_model = require_key(self.config["Training"], "motion_model", "Training")
         if self.motion_model not in MOTION_MODELS:
@@ -248,97 +251,108 @@ class FrontEnd(mp.Process):
             # Light-model warm-up state (D43): keyframes in the map so far.
             self.shader.set_keyframe_count(len(self.kf_indices))
 
-        # Only this camera's pose delta and exposure are optimized. The map
-        # snapshot in self.gaussians is detached (clone_obj), so no gradient
-        # reaches the Gaussians here.
-        opt_params = []
-        opt_params.append(
-            {
-                "params": [viewpoint.cam_rot_delta],
-                "lr": self.config["Training"]["lr"]["cam_rot_delta"],
-                "name": "rot_{}".format(viewpoint.uid),
-            }
-        )
-        opt_params.append(
-            {
-                "params": [viewpoint.cam_trans_delta],
-                "lr": self.config["Training"]["lr"]["cam_trans_delta"],
-                "name": "trans_{}".format(viewpoint.uid),
-            }
-        )
-        opt_params.append(
-            {
-                "params": [viewpoint.exposure_a],
-                "lr": 0.01,
-                "name": "exposure_a_{}".format(viewpoint.uid),
-            }
-        )
-        opt_params.append(
-            {
-                "params": [viewpoint.exposure_b],
-                "lr": 0.01,
-                "name": "exposure_b_{}".format(viewpoint.uid),
-            }
-        )
-
-        # A fresh optimizer per frame: Adam state never carries over.
-        # fused: one kernel for all groups instead of a few per tensor (D130).
-        pose_optimizer = torch.optim.Adam(opt_params, fused=True)
-        # Constants of the observed frame (sensor depth on the GPU, masks of
-        # the observation, ...) are built once per frame instead of once per
-        # iteration (utils/perf.py, docs/DECISIONS.md D128).
-        graphed = self.graphed_shading()
-        if graphed is not None:
-            graphed.begin_frame(viewpoint)
+        loop = self.graphed_iteration()
+        if loop is not None:
+            # Every iteration but the first replayed as one CUDA graph (D133).
+            graphed = loop
+            loop.begin_frame(viewpoint)
+            loss_tracking, render_pkg = loop.track(
+                viewpoint, self.gaussians, self.pipeline_params, self.background,
+                viewpoint.R, viewpoint.T, self.tracking_itr_num)
+            depth, opacity = render_pkg["depth"], render_pkg["opacity"]
+            self.last_tracking_iters = loop.iterations  # timing log (D79)
         else:
-            viewpoint.frame_cache = {}
-        gui = self.gui_enabled()
-        for tracking_itr in range(self.tracking_itr_num):
-            render_pkg = render(
-                viewpoint,
-                self.gaussians,
-                self.pipeline_params,
-                self.background,
-                shader=self.shader,
-                defer_shading=graphed is not None,
+            # Only this camera's pose delta and exposure are optimized. The map
+            # snapshot in self.gaussians is detached (clone_obj), so no gradient
+            # reaches the Gaussians here.
+            opt_params = []
+            opt_params.append(
+                {
+                    "params": [viewpoint.cam_rot_delta],
+                    "lr": self.config["Training"]["lr"]["cam_rot_delta"],
+                    "name": "rot_{}".format(viewpoint.uid),
+                }
             )
-            pose_optimizer.zero_grad()
-            if graphed is None:
-                loss_tracking = get_loss_tracking(self.config, render_pkg, viewpoint)
+            opt_params.append(
+                {
+                    "params": [viewpoint.cam_trans_delta],
+                    "lr": self.config["Training"]["lr"]["cam_trans_delta"],
+                    "name": "trans_{}".format(viewpoint.uid),
+                }
+            )
+            opt_params.append(
+                {
+                    "params": [viewpoint.exposure_a],
+                    "lr": 0.01,
+                    "name": "exposure_a_{}".format(viewpoint.uid),
+                }
+            )
+            opt_params.append(
+                {
+                    "params": [viewpoint.exposure_b],
+                    "lr": 0.01,
+                    "name": "exposure_b_{}".format(viewpoint.uid),
+                }
+            )
+
+            # A fresh optimizer per frame: Adam state never carries over.
+            # fused: one kernel for all groups instead of a few per tensor (D130).
+            pose_optimizer = torch.optim.Adam(opt_params, fused=True)
+            # Constants of the observed frame (sensor depth on the GPU, masks of
+            # the observation, ...) are built once per frame instead of once per
+            # iteration (utils/perf.py, docs/DECISIONS.md D128).
+            graphed = self.graphed_shading()
+            if graphed is not None:
+                graphed.begin_frame(viewpoint)
             else:
-                # Shading + loss replayed as CUDA graphs (D130); the frame's
-                # first iteration runs them eagerly to fill its buffers.
-                # Recorded again only when the shader's Python state changes
-                # (warm-ups), not at every keyframe (D131).
-                loss_tracking, render_pkg = graphed.step(
-                    render_pkg, viewpoint, self.shader.graph_state(), eager=tracking_itr == 0)
-            image, depth, opacity = (
-                render_pkg["render"],
-                render_pkg["depth"],
-                render_pkg["opacity"],
-            )
-            loss_tracking.backward()
-
-            with torch.no_grad():
-                # Adam moves the pose delta, update_pose folds it into R/T
-                # (see pose_utils.update_pose).
-                pose_optimizer.step()
-                converged = self.pose_update(viewpoint)
-
-            # Live GUI update, every 10 iterations.
-            if gui and tracking_itr % 10 == 0:
-                self.q_main2vis.put(
-                    gui_utils.GaussianPacket(
-                        current_frame=viewpoint,
-                        gtcolor=viewpoint.original_image,
-                        gtdepth=viewpoint.depth
-                        if not self.monocular
-                        else np.zeros((viewpoint.image_height, viewpoint.image_width)),
-                    )
+                viewpoint.frame_cache = {}
+            gui = self.gui_enabled()
+            for tracking_itr in range(self.tracking_itr_num):
+                render_pkg = render(
+                    viewpoint,
+                    self.gaussians,
+                    self.pipeline_params,
+                    self.background,
+                    shader=self.shader,
+                    defer_shading=graphed is not None,
                 )
-            if converged:
-                break
-        self.last_tracking_iters = tracking_itr + 1  # timing log (D79)
+                pose_optimizer.zero_grad()
+                if graphed is None:
+                    loss_tracking = get_loss_tracking(self.config, render_pkg, viewpoint)
+                else:
+                    # Shading + loss replayed as CUDA graphs (D130); the frame's
+                    # first iteration runs them eagerly to fill its buffers.
+                    # Recorded again only when the shader's Python state changes
+                    # (warm-ups), not at every keyframe (D131).
+                    loss_tracking, render_pkg = graphed.step(
+                        render_pkg, viewpoint, self.shader.graph_state(), eager=tracking_itr == 0)
+                image, depth, opacity = (
+                    render_pkg["render"],
+                    render_pkg["depth"],
+                    render_pkg["opacity"],
+                )
+                loss_tracking.backward()
+
+                with torch.no_grad():
+                    # Adam moves the pose delta, update_pose folds it into R/T
+                    # (see pose_utils.update_pose).
+                    pose_optimizer.step()
+                    converged = self.pose_update(viewpoint)
+
+                # Live GUI update, every 10 iterations.
+                if gui and tracking_itr % 10 == 0:
+                    self.q_main2vis.put(
+                        gui_utils.GaussianPacket(
+                            current_frame=viewpoint,
+                            gtcolor=viewpoint.original_image,
+                            gtdepth=viewpoint.depth
+                            if not self.monocular
+                            else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+                        )
+                    )
+                if converged:
+                    break
+            self.last_tracking_iters = tracking_itr + 1  # timing log (D79)
 
         # Typical scene depth at this frame. Keyframe distance thresholds are
         # expressed relative to it (see is_keyframe). Computed from the last
@@ -369,6 +383,16 @@ class FrontEnd(mp.Process):
         else:
             viewpoint.frame_cache = None
         return render_pkg
+
+    def graphed_iteration(self):
+        """GraphedTrackingLoop when Training.cuda_graph_iteration (D133), else None."""
+        if self.graph_iteration is None:
+            return None
+        if getattr(self, "_graph_loop", None) is None:
+            from utils.graphed_iteration import GraphedTrackingLoop
+
+            self._graph_loop = GraphedTrackingLoop(self.config, self.shader, self.graph_iteration)
+        return self._graph_loop
 
     def graphed_shading(self):
         """GraphedShadeLoss when Training.cuda_graph_tracking (D130), else None."""

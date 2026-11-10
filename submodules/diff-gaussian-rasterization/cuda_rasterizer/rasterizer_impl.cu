@@ -1,3 +1,4 @@
+#include <c10/cuda/CUDAStream.h>
 /*
  * Copyright (C) 2023, Inria
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
@@ -67,6 +68,50 @@ __global__ void checkFrustum(int P,
 
 // Generates one key/value pair for all Gaussian / tile overlaps. 
 // Run once per Gaussian (1:N mapping).
+// Capacity mode (D133): entries at or beyond `capacity` are dropped (the caller
+// sees the true count and must render again with more room).
+__global__ void duplicateWithKeysCapped(
+	int P,
+	const float2* points_xy,
+	const float* depths,
+	const uint32_t* offsets,
+	uint64_t* gaussian_keys_unsorted,
+	uint32_t* gaussian_values_unsorted,
+	int* radii,
+	dim3 grid,
+	uint32_t capacity)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+	if (radii[idx] > 0)
+	{
+		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
+		uint2 rect_min, rect_max;
+		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		for (int y = rect_min.y; y < rect_max.y; y++)
+		{
+			for (int x = rect_min.x; x < rect_max.x; x++)
+			{
+				if (off >= capacity)
+					return;
+				uint64_t key = y * grid.x + x;
+				key <<= 32;
+				key |= *((uint32_t*)&depths[idx]);
+				gaussian_keys_unsorted[off] = key;
+				gaussian_values_unsorted[off] = idx;
+				off++;
+			}
+		}
+	}
+}
+
+__global__ void copyCount(const uint32_t* point_offsets, int P, int* out)
+{
+	if (threadIdx.x == 0 && blockIdx.x == 0)
+		out[0] = (P > 0) ? (int)point_offsets[P - 1] : 0;
+}
+
 __global__ void duplicateWithKeys(
 	int P,
 	const float2* points_xy,
@@ -113,9 +158,12 @@ __global__ void duplicateWithKeys(
 // Check keys to see if it is at the start/end of one tile's range in 
 // the full sorted list. If yes, write start/end of this tile. 
 // Run once per instanced (duplicated) Gaussian ID.
-__global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* ranges)
+__global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* ranges, const uint32_t* L_device = nullptr)
 {
 	auto idx = cg::this_grid().thread_rank();
+	// With a fixed capacity the true count lives on the device (D133).
+	if (L_device != nullptr)
+		L = min((int)L_device[0], L);
 	if (idx >= L)
 		return;
 
@@ -145,7 +193,7 @@ void CudaRasterizer::Rasterizer::markVisible(
 	float* projmatrix,
 	bool* present)
 {
-	checkFrustum << <(P + 255) / 256, 256 >> > (
+	checkFrustum <<<(P + 255) / 256, 256, 0, c10::cuda::getCurrentCUDAStream()>>> (
 		P,
 		means3D,
 		viewmatrix, projmatrix,
@@ -220,8 +268,11 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_opacity,
 	int* radii,
 	int* n_touched,
-	bool debug)
+	bool debug,
+	int capacity,
+	int* num_rendered_out)
 {
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
@@ -277,11 +328,26 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P, stream), debug)
 
-	// Retrieve total number of Gaussian instances to launch and resize aux buffers
+	// Retrieve total number of Gaussian instances to launch and resize aux buffers.
+	// Capacity mode (capacity > 0, D133): no device-to-host copy (it made the
+	// CPU wait for the GPU at every render and cannot be recorded in a CUDA
+	// graph). The buffers hold `capacity` entries; the true count goes to
+	// num_rendered_out on the device; unused entries get the largest key so
+	// that the (stable) sort leaves the real entries exactly as before.
 	int num_rendered;
-	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+	if (capacity > 0)
+	{
+		num_rendered = capacity;
+		copyCount <<<1, 1, 0, stream>>> (geomState.point_offsets, P, num_rendered_out);
+	}
+	else
+	{
+		CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+		if (num_rendered_out != nullptr)
+			copyCount <<<1, 1, 0, stream>>> (geomState.point_offsets, P, num_rendered_out);
+	}
 
 	size_t binning_chunk_size = required<BinningState>(num_rendered);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
@@ -289,15 +355,32 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
-	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
-		P,
-		geomState.means2D,
-		geomState.depths,
-		geomState.point_offsets,
-		binningState.point_list_keys_unsorted,
-		binningState.point_list_unsorted,
-		radii,
-		tile_grid)
+	if (capacity > 0)
+	{
+		CHECK_CUDA(cudaMemsetAsync(binningState.point_list_keys_unsorted, 0xff, (size_t)num_rendered * sizeof(uint64_t), stream), debug);
+		duplicateWithKeysCapped <<<(P + 255) / 256, 256, 0, stream>>> (
+			P,
+			geomState.means2D,
+			geomState.depths,
+			geomState.point_offsets,
+			binningState.point_list_keys_unsorted,
+			binningState.point_list_unsorted,
+			radii,
+			tile_grid,
+			(uint32_t)capacity);
+	}
+	else
+	{
+		duplicateWithKeys <<<(P + 255) / 256, 256, 0, stream>>> (
+			P,
+			geomState.means2D,
+			geomState.depths,
+			geomState.point_offsets,
+			binningState.point_list_keys_unsorted,
+			binningState.point_list_unsorted,
+			radii,
+			tile_grid);
+	}
 	CHECK_CUDA(, debug)
 
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
@@ -308,16 +391,17 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
-		num_rendered, 0, 32 + bit), debug)
+		num_rendered, 0, 32 + bit, stream), debug)
 
-	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
+	CHECK_CUDA(cudaMemsetAsync(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2), stream), debug);
 
 	// Identify start and end of per-tile workloads in sorted list
 	if (num_rendered > 0)
-		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
+		identifyTileRanges <<<(num_rendered + 255) / 256, 256, 0, stream>>> (
 			num_rendered,
 			binningState.point_list_keys,
-			imgState.ranges);
+			imgState.ranges,
+			capacity > 0 ? geomState.point_offsets + P - 1 : nullptr);
 	CHECK_CUDA(, debug)
 
 	// Let each tile blend its range of Gaussians independently in parallel

@@ -53,7 +53,9 @@ RasterizeGaussiansCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
-	const bool debug)
+	const bool debug,
+	const int capacity,
+	const torch::Tensor& num_rendered_out)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
     AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -63,6 +65,12 @@ RasterizeGaussiansCUDA(
   const int H = image_height;
   const int W = image_width;
 
+  if (capacity > 0 && num_rendered_out.numel() < 1) {
+    AT_ERROR("capacity > 0 needs num_rendered_out: an int32 CUDA tensor with one element");
+  }
+  if (num_rendered_out.numel() > 0 && (num_rendered_out.scalar_type() != torch::kInt32 || !num_rendered_out.is_cuda())) {
+    AT_ERROR("num_rendered_out must be an int32 CUDA tensor");
+  }
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
 
@@ -116,7 +124,13 @@ RasterizeGaussiansCUDA(
 		out_opaticy.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		n_touched.contiguous().data<int>(),
-        debug);
+        debug,
+        capacity,
+        num_rendered_out.numel() > 0 ? num_rendered_out.data_ptr<int>() : nullptr);
+  }
+  else if (num_rendered_out.numel() > 0)
+  {
+	  num_rendered_out.zero_();
   }
   return std::make_tuple(rendered, out_color, radii, geomBuffer, binningBuffer, imgBuffer, out_depth, out_opaticy, n_touched);
 }

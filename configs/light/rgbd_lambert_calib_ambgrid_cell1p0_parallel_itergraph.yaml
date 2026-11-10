@@ -1,0 +1,17 @@
+# Speed (docs/DECISIONS.md D133): rgbd_lambert_calib_ambgrid_cell1p0_parallel.yaml
+# with the whole tracking iteration (render, shading, loss, backward, Adam,
+# pose update) replayed as one CUDA graph instead of only shading + loss.
+# Needs the rasterizer wheel built after D133.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0_parallel.yaml"
+
+Training:
+  cuda_graph_tracking: false
+  cuda_graph_iteration:
+    enabled: true
+    # Convergence is read every check_every replays; the pose is frozen on
+    # the GPU once converged, so this only trades waits against idle replays.
+    check_every: 2
+    # Binning capacity = margin x the instance count (recorded again when
+    # exceeded); map buffers = margin x the number of Gaussians.
+    raster_capacity_margin: 1.3
+    map_capacity_margin: 1.2

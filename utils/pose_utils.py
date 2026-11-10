@@ -103,7 +103,11 @@ def SE3_exp(tau):
     return T
 
 
-def update_pose(camera, converged_threshold=1e-4):
+# Norm of the 6-vector step below which tracking stops (MonoGS's value).
+CONVERGED_THRESHOLD = 1e-4
+
+
+def update_pose(camera, converged_threshold=CONVERGED_THRESHOLD):
     # Applies one accumulated optimizer step to a camera's pose, and reports
     # whether tracking has converged. Called after every Adam.step() during
     # both frontend tracking (FrontEnd.tracking) and backend pose refinement
@@ -159,7 +163,7 @@ def _se3_exp_np(tau):
     return out
 
 
-def update_pose_host(camera, converged_threshold=1e-4):
+def update_pose_host(camera, converged_threshold=CONVERGED_THRESHOLD):
     """update_pose computed on the CPU, for the frontend's tracking loop
     (docs/DECISIONS.md D128). The loop synchronizes with the GPU every
     iteration anyway to test convergence; reading the 6-vector there and doing

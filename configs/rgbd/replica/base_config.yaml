@@ -77,6 +77,10 @@ Training:
   # Shading + tracking loss replayed as CUDA graphs (light model only,
   # same values, fewer kernel launches; docs/DECISIONS.md D130).
   cuda_graph_tracking: false
+  # The whole tracking iteration (render, shading, loss, backward, Adam,
+  # pose update) replayed as one CUDA graph (light model only;
+  # docs/DECISIONS.md D133). Supersedes cuda_graph_tracking.
+  cuda_graph_iteration: {enabled: false}
   # Tracking pose update: host (float64 on the CPU) or device (float32 on
   # the GPU, original MonoGS); docs/DECISIONS.md D132.
   tracking_pose_update: host

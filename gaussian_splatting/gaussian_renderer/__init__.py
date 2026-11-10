@@ -45,6 +45,8 @@ def render(
     *,
     shader,
     defer_shading=False,
+    raster_capacity=0,
+    raster_count=None,
 ):
     """
     Render the scene.
@@ -149,6 +151,12 @@ def render(
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=False,
+        # Fixed binning capacity, no device-to-host copy of the instance
+        # count; the true count is written to raster_count (CUDA graph replay
+        # of the whole tracking iteration, docs/DECISIONS.md D133). 0 = the
+        # original behaviour.
+        capacity=raster_capacity,
+        num_rendered_out=raster_count,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
