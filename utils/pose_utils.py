@@ -30,15 +30,13 @@ def skew_sym_mat(x):
     # Build the skew-symmetric "hat" matrix [x]_x of a 3-vector x, such that
     # [x]_x @ v == cross(x, v) for any vector v. This is the building block
     # of the so(3) exponential map below (so(3) = skew-symmetric matrices).
-    device = x.device
-    dtype = x.dtype
-    ssm = torch.zeros(3, 3, device=device, dtype=dtype)
-    ssm[0, 1] = -x[2]
-    ssm[0, 2] = x[1]
-    ssm[1, 0] = x[2]
-    ssm[1, 2] = -x[0]
-    ssm[2, 0] = -x[1]
-    ssm[2, 1] = x[0]
+    # One stack instead of 6 indexed writes (docs/DECISIONS.md D128).
+    zero = torch.zeros((), device=x.device, dtype=x.dtype)
+    ssm = torch.stack([
+        torch.stack([zero, -x[2], x[1]]),
+        torch.stack([x[2], zero, -x[0]]),
+        torch.stack([-x[1], x[0], zero]),
+    ])
     return ssm
 
 
@@ -56,14 +54,13 @@ def SO3_exp(theta):
     W2 = W @ W
     angle = torch.norm(theta)
     I = torch.eye(3, device=device, dtype=dtype)
-    if angle < 1e-5:
-        return I + W + 0.5 * W2
-    else:
-        return (
-            I
-            + (torch.sin(angle) / angle) * W
-            + ((1 - torch.cos(angle)) / (angle**2)) * W2
-        )
+    # The branch is chosen on the GPU (torch.where, docs/DECISIONS.md D128):
+    # a Python `if` on a CUDA tensor synchronizes, and this runs once per
+    # camera per optimization step. Same two formulas as before.
+    small = angle < 1e-5
+    a = torch.where(small, torch.ones_like(angle), torch.sin(angle) / angle)
+    b = torch.where(small, torch.full_like(angle, 0.5), (1 - torch.cos(angle)) / (angle**2))
+    return I + a * W + b * W2
 
 
 def V(theta):
@@ -79,15 +76,11 @@ def V(theta):
     W = skew_sym_mat(theta)
     W2 = W @ W
     angle = torch.norm(theta)
-    if angle < 1e-5:
-        V = I + 0.5 * W + (1.0 / 6.0) * W2
-    else:
-        V = (
-            I
-            + W * ((1.0 - torch.cos(angle)) / (angle**2))
-            + W2 * ((angle - torch.sin(angle)) / (angle**3))
-        )
-    return V
+    # Branch on the GPU, as in SO3_exp.
+    small = angle < 1e-5
+    a = torch.where(small, torch.full_like(angle, 0.5), (1.0 - torch.cos(angle)) / (angle**2))
+    b = torch.where(small, torch.full_like(angle, 1.0 / 6.0), (angle - torch.sin(angle)) / (angle**3))
+    return I + W * a + W2 * b
 
 
 def SE3_exp(tau):
@@ -142,6 +135,25 @@ def update_pose(camera, converged_threshold=1e-4):
 
     # The delta has now been absorbed into camera.R/T, so reset it to zero
     # before the next iteration accumulates a fresh one on top.
+    camera.cam_rot_delta.data.fill_(0)
+    camera.cam_trans_delta.data.fill_(0)
+    return converged
+
+
+def update_pose_host(camera, converged_threshold=1e-4):
+    """update_pose computed on the CPU, for the frontend's tracking loop
+    (docs/DECISIONS.md D128). The loop synchronizes with the GPU every
+    iteration anyway to test convergence; reading the 6-vector there and doing
+    the SE(3) update on the host replaces ~40 tiny GPU kernels. Same formulas,
+    in float64, then back to the camera's float32 R, T. Returns a bool."""
+    tau = torch.cat([camera.cam_trans_delta, camera.cam_rot_delta], axis=0).detach()
+    tau = tau.to("cpu", torch.float64)
+    T_w2c = torch.eye(4, dtype=torch.float64)
+    T_w2c[0:3, 0:3] = camera.R.detach().to("cpu", torch.float64)
+    T_w2c[0:3, 3] = camera.T.detach().to("cpu", torch.float64)
+    new_w2c = SE3_exp(tau) @ T_w2c
+    converged = bool(tau.norm() < converged_threshold)
+    camera.update_RT(new_w2c[0:3, 0:3].to(camera.R.dtype), new_w2c[0:3, 3].to(camera.T.dtype))
     camera.cam_rot_delta.data.fill_(0)
     camera.cam_trans_delta.data.fill_(0)
     return converged

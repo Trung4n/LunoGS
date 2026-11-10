@@ -24,6 +24,7 @@ import light_models.angular  # noqa: F401
 import light_models.cosine  # noqa: F401
 import light_models.falloff  # noqa: F401
 import light_models.normals  # noqa: F401
+from light_models.device import on_device
 from light_models.gbuffer import surface_points
 from light_models.learning import make_learnable, read_schedule
 from light_models.params import resolve_param
@@ -174,7 +175,7 @@ class ColocatedShader:
                 t.copy_(torch.tensor(value, dtype=t.dtype))
 
     def _light_axis(self, dev, dt):
-        axis = self.axis.to(dev, dt)
+        axis = on_device(self.axis, dev, dt)
         if self.tilt_deg is None:
             return axis
         tilt = self.tilt_deg.to(dev, dt) * (math.pi / 180.0)
@@ -221,7 +222,7 @@ class ColocatedShader:
             return {"radiance_linear": albedo * 0.0, "light_valid": valid[None],
                     "light_direct": zeros[None]}
         dev, dt = points.device, points.dtype
-        t = self.t_CL.to(dev, dt).view(3, 1, 1)
+        t = on_device(self.t_CL, dev, dt).view(3, 1, 1)
         axis = self._light_axis(dev, dt).view(3, 1, 1)
 
         v = points - t
@@ -232,7 +233,7 @@ class ColocatedShader:
         phi = self.angular(cos_theta)
         fall = self.falloff(dist)
         cos_term, aux = self.cosine(points, valid, to_light, gbuffer, viewpoint_camera)
-        k = self.intensity.to(dev, dt)
+        k = on_device(self.intensity, dev, dt)
         direct = k * (phi * fall * cos_term)
         if self._ambient_field:
             # x_C = R x_W + T (Camera.R, Camera.T: world to camera).

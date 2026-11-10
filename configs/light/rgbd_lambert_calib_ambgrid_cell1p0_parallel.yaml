@@ -1,0 +1,7 @@
+# Speed ablation of the main model (docs/DECISIONS.md D128): the frontend keeps
+# tracking while the backend maps a new keyframe (MonoGS sync_mode parallel),
+# instead of waiting for it (hybrid).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0.yaml"
+
+Training:
+  sync_mode: parallel

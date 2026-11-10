@@ -122,7 +122,13 @@ class Camera(nn.Module):
         # Factory used by FrontEnd.run(): pulls (image, depth, gt_pose) from
         # the dataset and pairs it with the dataset's shared intrinsics to
         # build one Camera per loop iteration.
-        gt_color, gt_depth, gt_pose = dataset[idx]
+        return Camera.init_from_data(dataset, idx, projection_matrix, dataset[idx])
+
+    @staticmethod
+    def init_from_data(dataset, idx, projection_matrix, data):
+        # Same as init_from_dataset, with dataset[idx] already read (the
+        # frontend reads the next frame ahead, utils/perf.py, D128).
+        gt_color, gt_depth, gt_pose = data
         return Camera(
             idx,
             gt_color,
@@ -152,27 +158,42 @@ class Camera(nn.Module):
             uid, None, None, T, projection_matrix, fx, fy, cx, cy, FoVx, FoVy, H, W
         )
 
+    def _pose_matrices(self):
+        # (world_view_transform, full_proj_transform, camera_center), cached
+        # for the current R, T, projection_matrix (docs/DECISIONS.md D128):
+        # a render reads them several times and tracking renders the same pose
+        # until update_pose replaces R, T. The key holds the tensors
+        # themselves (not their id(), which Python reuses) and their version
+        # counters (in-place writes).
+        key = (self.R, self.R._version, self.T, self.T._version, self.projection_matrix)
+        cache = getattr(self, "_matrix_cache", None)
+        if cache is None or any(a is not b if torch.is_tensor(a) else a != b
+                                for a, b in zip(cache[0], key)):
+            wv = getWorld2View2(self.R, self.T).transpose(0, 1)
+            fp = wv.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0)).squeeze(0)
+            # inverse(world_view)[3, :3] for a rigid pose: -R^T T.
+            cc = -(self.R.transpose(0, 1) @ self.T)
+            cache = (key, (wv, fp, cc))
+            self._matrix_cache = cache
+        return cache[1]
+
     @property
     def world_view_transform(self):
         # 4x4 view matrix (world -> camera), transposed to match the
         # rasterizer's expected (row-vector-on-the-left) matrix convention.
-        return getWorld2View2(self.R, self.T).transpose(0, 1)
+        return self._pose_matrices()[0]
 
     @property
     def full_proj_transform(self):
         # Combined view + projection matrix (world -> clip space), what the
         # rasterizer actually uses to place Gaussians on screen.
-        return (
-            self.world_view_transform.unsqueeze(0).bmm(
-                self.projection_matrix.unsqueeze(0)
-            )
-        ).squeeze(0)
+        return self._pose_matrices()[1]
 
     @property
     def camera_center(self):
-        # Camera position in world space, recovered by inverting the view
-        # matrix. Used by the renderer for view-dependent SH color evaluation.
-        return self.world_view_transform.inverse()[3, :3]
+        # Camera position in world space (inverse of the view matrix). Used by
+        # the renderer for view-dependent SH color evaluation.
+        return self._pose_matrices()[2]
 
     def update_RT(self, R, t):
         # Overwrite the current pose estimate outright (as opposed to the
@@ -245,6 +266,7 @@ class Camera(nn.Module):
         self.original_image = None
         self.depth = None
         self.grad_mask = None
+        self.frame_cache = None
 
         self.cam_rot_delta = None
         self.cam_trans_delta = None

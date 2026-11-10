@@ -8,6 +8,7 @@ import math
 import torch
 import torch.nn.functional as F
 
+from light_models.device import on_device
 from light_models.registry import declare_planned, register
 
 
@@ -67,7 +68,7 @@ class MultiplicativeConst:
         return _project_nonnegative(self.c)
 
     def __call__(self, albedo, direct):
-        c = self.c.to(albedo.device, albedo.dtype)
+        c = on_device(self.c, albedo.device, albedo.dtype)
         return albedo * (_direct3(direct) + c)
 
 
@@ -86,7 +87,7 @@ class AdditiveConst:
         return _project_nonnegative(self.c)
 
     def __call__(self, albedo, direct):
-        c = self.c.to(albedo.device, albedo.dtype)
+        c = on_device(self.c, albedo.device, albedo.dtype)
         return albedo * _direct3(direct) + c
 
 
@@ -157,7 +158,7 @@ class PerGaussian(MultiplicativeConst):
             return {}
         r = gaussians.get_extra(self.EXTRA)
         albedo = gaussians.get_albedo
-        c = self.c.to(albedo.device, albedo.dtype).view(1, -1)
+        c = on_device(self.c, albedo.device, albedo.dtype).view(1, -1)
         excess = (c + r).clamp_min(0.0) - c
         return {self.EXTRA: albedo * excess}
 
@@ -201,7 +202,7 @@ class PerGaussianGated(PerGaussian):
         m = gbuffer[self.EXTRA]
         d = _direct3(direct)
         free = d.amax(0, keepdim=True) <= self.residual_direct_max
-        c = self.c.to(albedo.device, albedo.dtype)
+        c = on_device(self.c, albedo.device, albedo.dtype)
         radiance = albedo * (d + c.where(free, c.detach()))
         return radiance + m.where(free, m.detach()), {
             "ambient_residual": m,
@@ -262,20 +263,21 @@ class PositionGrid(MultiplicativeConst):
         moved = r != 0
         return {"abs_mean_moved": float(r[moved].abs().mean()) if moved.any() else 0.0,
                 "min": float(r.min()), "max": float(r.max()),
-                "vertices_moved": float(moved.sum()), "outside_frac": self._outside_frac}
+                "vertices_moved": float(moved.sum()), "outside_frac": float(self._outside_frac)}
 
     def field(self, points_world):
         """(channels,H,W) r at the (3,H,W) world points."""
         dev, dt = points_world.device, points_world.dtype
         coords = (points_world / self.half_extent_m).permute(1, 2, 0)[None, None]
-        grid = self.residual.to(dev, dt)[None]
+        grid = on_device(self.residual, dev, dt)[None]
         return F.grid_sample(grid, coords, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0]
 
     def __call__(self, albedo, direct, points_world):
         points_world = points_world.detach()
-        self._outside_frac = float((points_world.abs() > self.half_extent_m).any(0).float().mean())
+        # Kept as a tensor: float() here would synchronize every render (D128).
+        self._outside_frac = (points_world.abs() > self.half_extent_m).any(0).float().mean()
         r = self.field(points_world)
-        c = self.c.to(albedo.device, albedo.dtype)
+        c = on_device(self.c, albedo.device, albedo.dtype)
         radiance = albedo * (_direct3(direct) + (c + r).clamp_min(0.0))
         fixed_c = c.detach()
         m = albedo.detach() * ((fixed_c + r).clamp_min(0.0) - fixed_c)

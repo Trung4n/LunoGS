@@ -1,0 +1,6 @@
+# Speed ablation of the main model (docs/DECISIONS.md D128): tracking starts
+# from the previous pose moved by the last frame-to-frame motion.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0.yaml"
+
+Training:
+  motion_model: constant_velocity

@@ -1,5 +1,7 @@
-# Ablation of rgbd_lambert_calib_ambgrid.yaml (docs/DECISIONS.md D126): a coarser
-# grid, fewer degrees of freedom to trade with the albedo.
+# Main model since docs/DECISIONS.md D127: the calibrated lamp of
+# rgbd_lambert_calib.yaml with the ambient light as a 1 m grid over the scene
+# (D126). Coarser than rgbd_lambert_calib_ambgrid.yaml (0.5 m): fewer degrees of
+# freedom to trade with the albedo where the ambient light is uniform.
 inherit_from: "configs/light/rgbd_lambert_calib_ambgrid.yaml"
 
 Light:

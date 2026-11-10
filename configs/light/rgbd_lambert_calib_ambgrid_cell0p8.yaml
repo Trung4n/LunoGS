@@ -1,0 +1,7 @@
+# Ablation of rgbd_lambert_calib_ambgrid.yaml (docs/DECISIONS.md D127): grid cell
+# between 0.5 m (best E on ambvar_*) and 1 m (best albedo on uniform ambient).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid.yaml"
+
+Light:
+  ambient:
+    cell_m: 0.8

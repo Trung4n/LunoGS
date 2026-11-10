@@ -10,8 +10,13 @@ from gui import gui_utils
 from utils.camera_utils import Camera, build_projection_matrix
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
-from utils.multiprocessing_utils import clone_obj, raise_if_dead
-from utils.pose_utils import update_pose
+from utils.multiprocessing_utils import FakeQueue, clone_obj, raise_if_dead
+from utils.perf import FramePrefetcher, TimeBudget
+from utils.config_utils import require_key
+
+# Training.motion_model values (D128).
+MOTION_MODELS = ("none", "constant_velocity")
+from utils.pose_utils import update_pose_host
 from utils.run_recorder import open_recorder
 from light_models.diagnostics import log_pixel_usage, log_timing
 from utils.slam_utils import get_loss_tracking, get_median_depth, pixel_usage_stats
@@ -112,6 +117,12 @@ class FrontEnd(mp.Process):
         # tracking_itr_num: max optimizer steps per frame (stops early on
         # convergence, see tracking()).
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
+        # Initial pose of a frame before tracking (D128), see initial_pose().
+        self.motion_model = require_key(self.config["Training"], "motion_model", "Training")
+        if self.motion_model not in MOTION_MODELS:
+            raise ValueError(
+                f"Training.motion_model must be one of {MOTION_MODELS}, got {self.motion_model!r}"
+            )
         # kf_interval: minimum number of frames between two keyframes (only
         # enforced while the window is not full, or when wait_for_mapping).
         self.kf_interval = self.config["Training"]["kf_interval"]
@@ -225,9 +236,8 @@ class FrontEnd(mp.Process):
         # depth / opacity drive the keyframe decision and, if needed,
         # add_new_keyframe().
         #
-        # Initial guess = previous frame's pose (no motion model).
-        prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
-        viewpoint.update_RT(prev.R, prev.T)
+        # Initial guess: Training.motion_model (D128).
+        viewpoint.update_RT(*self.initial_pose(cur_frame_idx))
         if self.shader is not None:
             # Light-model warm-up state (D43): keyframes in the map so far.
             self.shader.set_keyframe_count(len(self.kf_indices))
@@ -267,6 +277,11 @@ class FrontEnd(mp.Process):
 
         # A fresh optimizer per frame: Adam state never carries over.
         pose_optimizer = torch.optim.Adam(opt_params)
+        # Constants of the observed frame (sensor depth on the GPU, masks of
+        # the observation, ...) are built once per frame instead of once per
+        # iteration (utils/perf.py, docs/DECISIONS.md D128).
+        viewpoint.frame_cache = {}
+        gui = self.gui_enabled()
         for tracking_itr in range(self.tracking_itr_num):
             render_pkg = render(
                 viewpoint,
@@ -288,10 +303,10 @@ class FrontEnd(mp.Process):
                 # Adam moves the pose delta, update_pose folds it into R/T
                 # (see pose_utils.update_pose).
                 pose_optimizer.step()
-                converged = update_pose(viewpoint)
+                converged = update_pose_host(viewpoint)
 
             # Live GUI update, every 10 iterations.
-            if tracking_itr % 10 == 0:
+            if gui and tracking_itr % 10 == 0:
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         current_frame=viewpoint,
@@ -329,7 +344,29 @@ class FrontEnd(mp.Process):
         if usage is not None and usage["frac_used_tracking"] == 0.0:
             # Nothing left for the tracking loss: the pose cannot move (D43).
             Log(f"frame {cur_frame_idx}: the tracking loss uses no pixel", tag="Light")
+        viewpoint.frame_cache = None
         return render_pkg
+
+    def initial_pose(self, cur_frame_idx):
+        """(R, T) world-to-camera to start tracking frame cur_frame_idx from.
+        none: the previous frame's pose (original MonoGS). constant_velocity:
+        the previous pose moved once more by the motion between the two
+        previous frames, w2c_k = (w2c_{k-1} w2c_{k-2}^-1) w2c_{k-1}; the
+        previous pose while there is only one."""
+        step = self.use_every_n_frames
+        prev = self.cameras[cur_frame_idx - step]
+        before = self.cameras.get(cur_frame_idx - 2 * step)
+        if self.motion_model == "none" or before is None:
+            return prev.R, prev.T
+        # Rigid inverse of w2c_{k-2}: (R^T, -R^T T).
+        r_rel = prev.R @ before.R.transpose(0, 1)
+        t_rel = prev.T - r_rel @ before.T
+        return r_rel @ prev.R, r_rel @ prev.T + t_rel
+
+    def gui_enabled(self):
+        # Without a GUI the queue to it is a FakeQueue: building its packets
+        # (a full copy of the map every frame) is pure overhead (D128).
+        return not isinstance(self.q_main2vis, FakeQueue)
 
     def is_keyframe(
         self,
@@ -535,6 +572,10 @@ class FrontEnd(mp.Process):
         # Per-frame timing, used only for the 3 fps throttle below.
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
+        # Where the frontend's wall time goes, logged at the end (D128).
+        budget = TimeBudget()
+        # The next frame is read from disk while this one is tracked (D128).
+        prefetch = FramePrefetcher(self.dataset)
 
         while True:
             # A dead backend never answers: stop instead of waiting forever (D117).
@@ -574,30 +615,36 @@ class FrontEnd(mp.Process):
                         self.recorder.finish(
                             self.cameras, self.kf_indices, self.gaussians, cur_frame_idx - 1
                         )
+                    prefetch.close()
+                    budget.log(cur_frame_idx)
                     break
 
                 # Wait states (sleep, then loop back to check the queues):
                 # - the backend is still building the initial map;
                 if self.requested_init:
-                    time.sleep(0.01)
+                    with budget("waiting for the backend"):
+                        time.sleep(0.01)
                     continue
 
                 # - wait_for_mapping: nothing new until the previous
                 #   keyframe has been fully mapped;
                 if self.wait_for_mapping and self.requested_keyframe > 0:
-                    time.sleep(0.01)
+                    with budget("waiting for the backend"):
+                        time.sleep(0.01)
                     continue
 
                 # - monocular initialization phase: same, the map is too
                 #   fragile to track new frames against a stale snapshot.
                 if not self.initialized and self.requested_keyframe > 0:
-                    time.sleep(0.01)
+                    with budget("waiting for the backend"):
+                        time.sleep(0.01)
                     continue
 
-                viewpoint = Camera.init_from_dataset(
-                    self.dataset, cur_frame_idx, projection_matrix
-                )
-                viewpoint.compute_grad_mask(self.config)
+                with budget("reading the frame"):
+                    viewpoint = Camera.init_from_data(
+                        self.dataset, cur_frame_idx, projection_matrix, prefetch.get(cur_frame_idx)
+                    )
+                    viewpoint.compute_grad_mask(self.config)
 
                 self.cameras[cur_frame_idx] = viewpoint
 
@@ -619,13 +666,15 @@ class FrontEnd(mp.Process):
 
                 # Tracking
                 t_track = time.perf_counter()
-                render_pkg = self.tracking(cur_frame_idx, viewpoint)
-                torch.cuda.synchronize()
+                with budget("tracking"):
+                    render_pkg = self.tracking(cur_frame_idx, viewpoint)
+                    torch.cuda.synchronize()
                 log_timing(self.save_dir, "tracking", cur_frame_idx,
                            1000 * (time.perf_counter() - t_track), self.last_tracking_iters)
                 if self.recorder is not None:
                     # Before cleanup() frees the frame's images.
-                    self.recorder.frame(cur_frame_idx, viewpoint, render_pkg, len(self.kf_indices))
+                    with budget("recorder"):
+                        self.recorder.frame(cur_frame_idx, viewpoint, render_pkg, len(self.kf_indices))
 
                 # GUI: current frame, window keyframes and a full copy of the
                 # map snapshot (a deep copy on every frame).
@@ -633,14 +682,15 @@ class FrontEnd(mp.Process):
                 current_window_dict[self.current_window[0]] = self.current_window[1:]
                 keyframes = [self.cameras[kf_idx] for kf_idx in self.current_window]
 
-                self.q_main2vis.put(
-                    gui_utils.GaussianPacket(
-                        gaussians=clone_obj(self.gaussians),
-                        current_frame=viewpoint,
-                        keyframes=keyframes,
-                        kf_window=current_window_dict,
+                if self.gui_enabled():
+                    self.q_main2vis.put(
+                        gui_utils.GaussianPacket(
+                            gaussians=clone_obj(self.gaussians),
+                            current_frame=viewpoint,
+                            keyframes=keyframes,
+                            kf_window=current_window_dict,
+                        )
                     )
-                )
 
                 # Backend still busy with the previous keyframe: keep tracking
                 # but don't consider this frame as a keyframe. This is what
@@ -699,15 +749,16 @@ class FrontEnd(mp.Process):
                             "Keyframes lacks sufficient overlap to initialize the map, resetting."
                         )
                         continue
-                    depth_map = self.add_new_keyframe(
-                        cur_frame_idx,
-                        depth=render_pkg["depth"],
-                        opacity=render_pkg["opacity"],
-                        init=False,
-                    )
-                    self.request_keyframe(
-                        cur_frame_idx, viewpoint, self.current_window, depth_map
-                    )
+                    with budget("new keyframe"):
+                        depth_map = self.add_new_keyframe(
+                            cur_frame_idx,
+                            depth=render_pkg["depth"],
+                            opacity=render_pkg["opacity"],
+                            init=False,
+                        )
+                        self.request_keyframe(
+                            cur_frame_idx, viewpoint, self.current_window, depth_map
+                        )
                 else:
                     self.cleanup(cur_frame_idx)
                 cur_frame_idx += 1
@@ -720,13 +771,14 @@ class FrontEnd(mp.Process):
                     and len(self.kf_indices) % self.save_trj_kf_intv == 0
                 ):
                     Log("Evaluating ATE at frame: ", cur_frame_idx)
-                    eval_ate(
-                        self.cameras,
-                        self.kf_indices,
-                        self.save_dir,
-                        cur_frame_idx,
-                        monocular=self.monocular,
-                    )
+                    with budget("periodic ATE"):
+                        eval_ate(
+                            self.cameras,
+                            self.kf_indices,
+                            self.save_dir,
+                            cur_frame_idx,
+                            monocular=self.monocular,
+                        )
                 toc.record()
                 torch.cuda.synchronize()
                 if create_kf:
@@ -734,10 +786,12 @@ class FrontEnd(mp.Process):
                     # (gives the backend time to map the new keyframe; this
                     # sleep is included in the FPS reported by slam.py)
                     duration = tic.elapsed_time(toc)
-                    time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
+                    with budget("3 fps throttle after a keyframe"):
+                        time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
                 # b) message from the backend.
-                data = self.frontend_queue.get()
+                with budget("messages from the backend"):
+                    data = self.frontend_queue.get()
                 # Periodic update from the backend's background mapping loop.
                 if data[0] == "sync_backend":
                     self.sync_backend(data)

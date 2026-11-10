@@ -4,6 +4,7 @@ from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from light_models import read_light_tracking
 from utils.color_space import sRGB2Linear
 from utils.config_utils import require_key
+from utils.perf import frame_constant
 
 # Loss functions and image helpers shared by tracking (FrontEnd) and mapping
 # (BackEnd). All losses are plain masked L1 photometric (+ optional depth)
@@ -39,7 +40,7 @@ def get_observed_in_loss_space(config, viewpoint):
     observed = viewpoint.original_image.cuda()
     if read_light_tracking(config).loss_color_space == "srgb":
         return observed
-    return sRGB2Linear(observed)
+    return frame_constant(viewpoint, "observed_linear", lambda: sRGB2Linear(observed))
 
 
 def apply_exposure_affine(config, image, viewpoint):
@@ -111,8 +112,11 @@ def get_saturation_keep(config, viewpoint, target):
     if not sm.enabled or target not in sm.apply_to:
         return None
     observed = viewpoint.original_image.cuda()
-    sat = saturated_observations(observed, sm.mode, sm.threshold_8bit)
-    return (~sat).to(observed.dtype)
+
+    def build():
+        sat = saturated_observations(observed, sm.mode, sm.threshold_8bit)
+        return (~sat).to(observed.dtype)
+    return frame_constant(viewpoint, ("saturation_keep", target), build)
 
 
 def get_loss_weight(config, render_pkg, viewpoint, target):
@@ -252,17 +256,20 @@ def tracking_rgb_mask(config, viewpoint, pixel_weight):
     # fraction of usable pixels (light_models/diagnostics.py), so the log
     # and the loss cannot drift apart. pixel_weight: get_loss_weight().
     observed = viewpoint.original_image.cuda()
-    _, h, w = observed.shape
-    mask_shape = (1, h, w)
-    # rgb_boundary_threshold: drop near-black GT pixels (sum of RGB below
-    # threshold) — typically black borders from undistortion/rectification
-    # that carry no real scene information. Computed on the observed image
-    # as stored, whatever the loss color space.
-    rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
-    rgb_pixel_mask = (observed.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
-    # ...and additionally keep only high-gradient (edge) pixels, see
-    # Camera.compute_grad_mask(): flat regions give almost no pose signal.
-    rgb_pixel_mask = rgb_pixel_mask * viewpoint.grad_mask
+
+    def build():
+        _, h, w = observed.shape
+        mask_shape = (1, h, w)
+        # rgb_boundary_threshold: drop near-black GT pixels (sum of RGB below
+        # threshold) — typically black borders from undistortion/rectification
+        # that carry no real scene information. Computed on the observed image
+        # as stored, whatever the loss color space.
+        rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
+        mask = (observed.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
+        # ...and additionally keep only high-gradient (edge) pixels, see
+        # Camera.compute_grad_mask(): flat regions give almost no pose signal.
+        return mask * viewpoint.grad_mask
+    rgb_pixel_mask = frame_constant(viewpoint, "tracking_rgb_mask", build)
     # Extension masks (get_loss_weight); None = baseline, op for op.
     if pixel_weight is not None:
         rgb_pixel_mask = rgb_pixel_mask * pixel_weight
@@ -329,9 +336,9 @@ def get_loss_tracking_rgbd(config, image, gt_image, depth, opacity, viewpoint, p
     # when the key was missing, now written in the configs (D47).
     alpha = require_key(config["Training"], "alpha", "Training")
 
-    gt_depth = torch.from_numpy(viewpoint.depth).to(
+    gt_depth = frame_constant(viewpoint, "sensor_depth", lambda: torch.from_numpy(viewpoint.depth).to(
         dtype=torch.float32, device=image.device
-    )[None]
+    )[None])
     # Depth term only where BOTH (a) the sensor returned a valid depth
     # (> 1 cm; 0 means "no reading") and (b) the map is well reconstructed
     # at that pixel (opacity > 0.95), otherwise the rendered depth is

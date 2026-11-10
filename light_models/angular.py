@@ -5,6 +5,7 @@ import math
 
 import torch
 
+from light_models.device import on_device
 from light_models.registry import declare_planned, register
 
 
@@ -45,8 +46,8 @@ class BlenderSpot:
             raise ValueError(f"Light.angular.blend left (0, 1]: {b!r}")
 
     def __call__(self, cos_theta):
-        a = self.half_angle_deg.to(cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
-        blend = self.blend.to(cos_theta.device, cos_theta.dtype)
+        a = on_device(self.half_angle_deg, cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
+        blend = on_device(self.blend, cos_theta.device, cos_theta.dtype)
         cos_a = torch.cos(a)
         x = ((cos_theta - cos_a) / ((1.0 - cos_a) * blend)).clamp(0.0, 1.0)
         return x * x * (3.0 - 2.0 * x)
@@ -197,9 +198,10 @@ def _linear_in_cos(cos_knots, values, cos_theta):
     knot order, i.e. decreasing); beyond the last knot the last value."""
     dev, dt = cos_theta.device, cos_theta.dtype
     # Ascending cos (descending theta) for bucketize.
-    a = cos_knots.to(dev, dt).flip(0)
-    va = values.to(dev, dt).flip(0)
-    c = cos_theta.clamp(min=float(a[0]), max=float(a[-1]))
+    # Bounds read on the CPU copy: float() of a GPU value synchronizes (D128).
+    c = cos_theta.clamp(min=float(cos_knots.min()), max=float(cos_knots.max()))
+    a = on_device(cos_knots, dev, dt).flip(0)
+    va = on_device(values, dev, dt).flip(0)
     hi = torch.bucketize(c.detach(), a).clamp(1, a.numel() - 1)
     lo = hi - 1
     t = (c - a[lo]) / (a[hi] - a[lo])
@@ -266,8 +268,8 @@ class Smoothstep:
             raise ValueError(f"Light.angular left 0 <= theta_in < theta_out < 90: {a!r}, {b!r}")
 
     def __call__(self, cos_theta):
-        a = self.theta_in.to(cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
-        b = self.theta_out.to(cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
+        a = on_device(self.theta_in, cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
+        b = on_device(self.theta_out, cos_theta.device, cos_theta.dtype) * (math.pi / 180.0)
         # acos only strictly inside the ramp: its derivative is infinite on
         # the light axis, where Phi is constant anyway.
         ramp = (cos_theta < torch.cos(a)) & (cos_theta > torch.cos(b))

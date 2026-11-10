@@ -31,12 +31,18 @@ def getWorld2View(R, t):
 
 
 def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
-    translate = translate.to(R.device)
-    Rt = torch.zeros((4, 4), device=R.device)
+    # eye + two block writes: `Rt[3, 3] = 1.0` copied a scalar from the host
+    # and made the CPU wait for the GPU (D128).
+    Rt = torch.eye(4, device=R.device)
     # Rt[:3, :3] = R.transpose()
     Rt[:3, :3] = R
     Rt[:3, 3] = t
-    Rt[3, 3] = 1.0
+    if scale == 1.0 and not bool(translate.any()):
+        # Without translate/scale the two inversions below give back Rt (up
+        # to round-off). torch.linalg.inv synchronizes with the GPU, and every
+        # render called this several times (docs/DECISIONS.md D128).
+        return Rt
+    translate = translate.to(R.device)
 
     C2W = torch.linalg.inv(Rt)
     cam_center = C2W[:3, 3]

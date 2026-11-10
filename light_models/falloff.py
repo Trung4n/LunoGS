@@ -3,6 +3,7 @@
 # d_l > 0 is guaranteed by the caller (points are in front of the camera and
 # invalid pixels get a finite fallback depth), so no epsilon here.
 
+from light_models.device import on_device
 from light_models.registry import declare_planned, register
 
 
@@ -24,7 +25,7 @@ class Lorentzian:
         self.tau = tau.tensor()
 
     def __call__(self, dist):
-        tau = self.tau.to(dist.device, dist.dtype)
+        tau = on_device(self.tau, dist.device, dist.dtype)
         return 1.0 / (dist * dist + tau * tau)
 
 
@@ -43,7 +44,7 @@ class Constant:
         self.distance = distance.tensor()
 
     def __call__(self, dist):
-        d = self.distance.to(dist.device, dist.dtype)
+        d = on_device(self.distance, dist.device, dist.dtype)
         return (1.0 / (d * d)).expand_as(dist)
 
 
