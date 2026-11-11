@@ -73,6 +73,9 @@ Training:
   # Mapping iterations per new keyframe with background mapping (sync_mode
   # parallel / hybrid); MonoGS had 10 written in the code (D132).
   keyframe_mapping_itr_num: 10
+  # In sync_mode parallel, also wait for each keyframe to be mapped (as
+  # hybrid) while the map has fewer keyframes than this; 0 = never (D137).
+  wait_for_mapping_keyframes: 0
   mapping_itr_num: 150
   gaussian_update_every: 150
   gaussian_update_offset: 50

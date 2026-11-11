@@ -1,0 +1,9 @@
+# rgbd_lambert_selfcal_bootstrap_parallel_fused.yaml, with tracking waiting
+# for each keyframe to be mapped (as sync_mode hybrid) until the map has 40
+# keyframes (D137): the lamp is learned in mapping only (spline from 3
+# keyframes, R_CL from 10, t_CL from 30), and parallel mode with fast tracking
+# left it few mapping iterations early on (0-250 frames: ATE 5.0 cm).
+inherit_from: "configs/light/rgbd_lambert_selfcal_bootstrap_parallel_fused.yaml"
+
+Training:
+  wait_for_mapping_keyframes: 40

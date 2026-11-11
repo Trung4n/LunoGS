@@ -307,3 +307,17 @@ def test_frozen_activations_equal_the_live_ones():
     for a, b in zip(live, (g.get_scaling, g.get_rotation, g.get_opacity, g.get_features)):
         torch.testing.assert_close(a, b, atol=0, rtol=0)
     assert g.get_scaling is g.get_scaling  # computed once
+
+
+def test_wait_for_mapping_keyframes_waits_only_early_in_parallel_mode():
+    # D137: parallel mode waits like hybrid while the map is small.
+    from utils.slam_frontend import FrontEnd
+
+    fe = object.__new__(FrontEnd)
+    fe.wait_for_mapping, fe.wait_for_mapping_keyframes = False, 3
+    fe.kf_indices = [0, 5]
+    assert fe.waits_for_mapping()
+    fe.kf_indices = [0, 5, 9]
+    assert not fe.waits_for_mapping()
+    fe.wait_for_mapping = True  # hybrid / sequential: always
+    assert fe.waits_for_mapping()

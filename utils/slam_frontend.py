@@ -142,6 +142,19 @@ class FrontEnd(mp.Process):
             "hybrid",
             "sequential",
         )
+        # Waits as in hybrid also in parallel mode while the map has fewer
+        # keyframes than this (0: never, MonoGS). The light parameters are
+        # learned in mapping only: early on they need the mapping that
+        # parallel mode skips when tracking is fast (D137).
+        n = require_key(self.config["Training"], "wait_for_mapping_keyframes", "Training")
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError(f"Training.wait_for_mapping_keyframes must be an integer >= 0, got {n!r}")
+        self.wait_for_mapping_keyframes = n
+
+    def waits_for_mapping(self):
+        """True while a new keyframe must be fully mapped before tracking on
+        (sync_mode hybrid / sequential, or Training.wait_for_mapping_keyframes)."""
+        return self.wait_for_mapping or len(self.kf_indices) < self.wait_for_mapping_keyframes
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         # Registers cur_frame_idx as a keyframe (appends it to kf_indices) and
@@ -690,7 +703,7 @@ class FrontEnd(mp.Process):
 
                 # - wait_for_mapping: nothing new until the previous
                 #   keyframe has been fully mapped;
-                if self.wait_for_mapping and self.requested_keyframe > 0:
+                if self.waits_for_mapping() and self.requested_keyframe > 0:
                     with budget("waiting for the backend"):
                         time.sleep(0.01)
                     continue
@@ -791,7 +804,7 @@ class FrontEnd(mp.Process):
                 # kf_interval is only enforced here and in the start-up branch;
                 # in parallel mode with a full window, the spacing comes
                 # from the "one keyframe in flight" rule above instead.
-                if self.wait_for_mapping:
+                if self.waits_for_mapping():
                     create_kf = check_time and create_kf
                 if create_kf:
                     self.current_window, removed = self.add_to_window(

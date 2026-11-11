@@ -1,0 +1,8 @@
+# rgbd_lambert_calib_ambgrid_cell1p0_parallel_fused.yaml, with tracking
+# waiting for each keyframe to be mapped (as sync_mode hybrid) until the map
+# has 40 keyframes (D137): the ambient field is learned in mapping (c from 10
+# keyframes, the grid residual from 20).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0_parallel_fused.yaml"
+
+Training:
+  wait_for_mapping_keyframes: 40
