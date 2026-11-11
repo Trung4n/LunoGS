@@ -190,7 +190,13 @@ class Spline:
         return torch.cat([torch.ones(1, dtype=self.knot_values.dtype), self.knot_values])
 
     def __call__(self, cos_theta):
-        return _linear_in_cos(self.cos_knots, self.values(), cos_theta)
+        # values() built on the device from the persistent GPU copy of the
+        # knot values (on_device), not a new CPU tensor at every call: same
+        # values, one address for CUDA graph replay (D135).
+        dev, dt = cos_theta.device, cos_theta.dtype
+        knots = on_device(self.knot_values, dev, dt)
+        values = torch.cat([torch.ones(1, device=dev, dtype=dt), knots])
+        return _linear_in_cos(self.cos_knots, values, cos_theta)
 
 
 def _linear_in_cos(cos_knots, values, cos_theta):

@@ -178,7 +178,28 @@ class ColocatedShader:
         axis = on_device(self.axis, dev, dt)
         if self.tilt_deg is None:
             return axis
-        tilt = self.tilt_deg.to(dev, dt) * (math.pi / 180.0)
+        if self.tilt_deg.requires_grad and torch.is_grad_enabled():
+            return self._tilted_axis(axis, dev, dt)  # mapping: differentiable
+        # Without gradient (tracking) the tilted axis only changes when the
+        # backend sends new values: kept in one buffer, computed again when
+        # the tilt changes (its version counter). Same values; matrix_exp
+        # waits for the GPU and cannot run inside a CUDA graph (D135).
+        key = (self.tilt_deg._version, str(dev), dt)
+        cached = getattr(self, "_axis_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        with torch.no_grad():
+            value = self._tilted_axis(axis, dev, dt)
+        if cached is not None and cached[0][1:] == key[1:]:
+            cached[1].copy_(value)
+            value = cached[1]
+        self._axis_cache = (key, value)
+        return value
+
+    def _tilted_axis(self, axis, dev, dt):
+        # on_device: the GPU copy stays at one address and follows the values
+        # the backend sends (D135).
+        tilt = on_device(self.tilt_deg, dev, dt) * (math.pi / 180.0)
         zero = torch.zeros((), device=dev, dtype=dt)
         # exp of the skew matrix of (tilt_x, tilt_y, 0): smooth at 0, unlike
         # the sin(theta)/theta form of Rodrigues.

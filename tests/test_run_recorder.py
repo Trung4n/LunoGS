@@ -297,3 +297,31 @@ def test_fixed_light_values_for_display(monkeypatch):
     phi, deg = np.asarray(out["phi"]), np.asarray(out["phi_deg"])
     assert phi[0] == pytest.approx(1.0) and phi[-1] == 0.0
     assert (phi[deg > 30.0] == 0).all() and deg[-1] > 30.0  # blender_spot: zero outside the cone
+
+
+def test_images_from_the_gpu_equal_the_cpu_ones(tmp_path):
+    # The writer thread reads asynchronous copies of CUDA tensors (D135).
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from PIL import Image
+
+    vp = _viewpoint(5)
+    pkg = _render_pkg(True)
+    out = {}
+    for dev in ("cpu", "cuda"):
+        rec = RunRecorder(CFG, str(tmp_path / dev), intrinsics={"fx": 30.0, "fy": 30.0, "cx": W / 2, "cy": H / 2,
+                                                                "width": W, "height": H},
+                          map_color="linear_albedo", background=[0.0, 0.0, 0.0])
+        v = SimpleNamespace(**{k: getattr(vp, k).to(dev) for k in ("R", "T", "original_image")},
+                            R_gt=vp.R_gt, T_gt=vp.T_gt)
+        rec.frame(5, v, {k: t.to(dev) for k, t in pkg.items()}, 1)
+        rec.finish({}, [], None, 5)
+        root = tmp_path / dev / "record"
+        out[dev] = {kind: np.asarray(Image.open(root / "images" / f"000005_{kind}.png"))
+                    for kind in ("obs", "render", "albedo", "depth")}
+        with open(root / "frames.csv") as f:
+            out[dev]["scale"] = float(list(csv.DictReader(f))[0]["albedo_scale"])
+    assert out["cpu"]["scale"] == pytest.approx(out["cuda"]["scale"], rel=1e-5)
+    for kind in ("obs", "render", "depth"):
+        assert np.array_equal(out["cpu"][kind], out["cuda"][kind]), kind
+    assert np.abs(out["cpu"]["albedo"].astype(int) - out["cuda"]["albedo"].astype(int)).max() <= 1

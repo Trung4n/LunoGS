@@ -29,10 +29,18 @@
 #
 # The reference (ground-truth) pose is written for the replay only, to draw
 # the reference trajectory next to the estimate; SLAM never reads it here.
+#
+# Writing runs on one background thread (docs/DECISIONS.md D135): the SLAM
+# thread only starts the copies from the GPU (asynchronous, pinned memory)
+# and queues the work; resizing, PNG encoding, the albedo display scale, the
+# CSV rows and the compressed map snapshots happen on the writer, in order.
+# Same files as before. finish() waits for the writer.
 
 import csv
 import json
 import os
+import queue
+import threading
 
 import numpy as np
 import torch
@@ -46,6 +54,63 @@ _INT_KEYS = ("frame_every", "map_every_keyframes", "image_width")
 # Percentile of the albedo used to scale the stored albedo image into [0, 1]
 # for display (the albedo is unbounded: K = 1 runs reach ~2-5). Display only.
 ALBEDO_DISPLAY_PERCENTILE = 99.0
+# Frames (or map snapshots) queued for the writer at most; the SLAM thread
+# waits beyond that. Bounds the host memory held by pending copies.
+WRITER_QUEUE = 8
+
+
+class _Writer:
+    """One background thread running queued calls in order. An error on the
+    thread is raised again on the next submit() or at close()."""
+
+    def __init__(self):
+        self._queue = queue.Queue(maxsize=WRITER_QUEUE)
+        self._error = None
+        self._thread = threading.Thread(target=self._run, name="run-recorder", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:
+                    return
+                if self._error is None:
+                    fn, args = item
+                    fn(*args)
+            except BaseException as e:  # noqa: BLE001 - re-raised on the SLAM thread
+                self._error = e
+            finally:
+                self._queue.task_done()
+
+    def _check(self):
+        if self._error is not None:
+            raise RuntimeError("run recorder: writing failed") from self._error
+
+    def submit(self, fn, *args):
+        self._check()
+        self._queue.put((fn, args))
+
+    def close(self):
+        self._queue.put(None)
+        self._thread.join()
+        self._check()
+
+
+def _to_host(t):
+    """Asynchronous copy to the host (pinned memory) of a CUDA tensor; a CPU
+    tensor as it is."""
+    t = t.detach()
+    return t.to("cpu", non_blocking=True) if t.is_cuda else t
+
+
+def _ready_event(*tensors):
+    """CUDA event after the copies just queued, or None without CUDA tensors."""
+    if any(torch.is_tensor(t) and t.is_cuda for t in tensors):
+        event = torch.cuda.Event()
+        event.record()
+        return event
+    return None
 
 
 def read_record_config(results_cfg):
@@ -126,6 +191,7 @@ class RunRecorder:
         self._csv.writerow(["frame_idx", "n_keyframes", "has_images", "albedo_scale"]
                            + _pose_cols("est") + _pose_cols("gt"))
         self._maps = set()
+        self._writer = _Writer()
 
     # ---- per frame ----
 
@@ -135,22 +201,35 @@ class RunRecorder:
         est = camera_to_world(viewpoint.R, viewpoint.T)
         gt = camera_to_world(viewpoint.R_gt, viewpoint.T_gt)
         images = render_pkg is not None and frame_idx % self.cfg["frame_every"] == 0
-        albedo_scale = ""
+        host = None
         if images:
-            albedo_scale = self._save_images(frame_idx, viewpoint, render_pkg)
-        self._csv.writerow([frame_idx, n_keyframes, int(images), albedo_scale]
+            host = {"obs": _to_host(viewpoint.original_image), "render": _to_host(render_pkg["render"]),
+                    "depth": _to_host(render_pkg["depth"])}
+            if "albedo" in render_pkg:
+                host["albedo"] = _to_host(render_pkg["albedo"])
+            host["ready"] = _ready_event(viewpoint.original_image, render_pkg["render"])
+        self._writer.submit(self._write_frame, frame_idx, n_keyframes, host, est, gt)
+
+    def _write_frame(self, frame_idx, n_keyframes, host, est, gt):
+        """Writer thread: the frame's images and its frames.csv row."""
+        albedo_scale = ""
+        if host is not None:
+            albedo_scale = self._save_images(frame_idx, host)
+        self._csv.writerow([frame_idx, n_keyframes, int(host is not None), albedo_scale]
                            + [f"{v:.7g}" for v in est.ravel()] + [f"{v:.7g}" for v in gt.ravel()])
         self._file.flush()
 
-    def _save_images(self, frame_idx, viewpoint, render_pkg):
+    def _save_images(self, frame_idx, host):
+        if host["ready"] is not None:
+            host["ready"].synchronize()
         w = self.cfg["image_width"]
         base = os.path.join(self.root, "images", f"{frame_idx:06d}")
-        _rgb_uint8(viewpoint.original_image, w).save(base + "_obs.png")
-        _rgb_uint8(render_pkg["render"], w).save(base + "_render.png")
-        _depth_uint16(render_pkg["depth"], w).save(base + "_depth.png")
-        if "albedo" not in render_pkg:
+        _rgb_uint8(host["obs"], w).save(base + "_obs.png")
+        _rgb_uint8(host["render"], w).save(base + "_render.png")
+        _depth_uint16(host["depth"], w).save(base + "_depth.png")
+        if "albedo" not in host:
             return ""
-        albedo = render_pkg["albedo"].detach().float()
+        albedo = host["albedo"].float()
         positive = albedo[albedo > 0]
         scale = float(torch.quantile(positive[:1_000_000], ALBEDO_DISPLAY_PERCENTILE / 100.0)) \
             if positive.numel() else 1.0
@@ -172,7 +251,8 @@ class RunRecorder:
 
     def refined_map(self, frame_idx, n_keyframes, gaussians):
         """The map after slam.py's offline color refinement (poses fixed):
-        maps/final_refined.npz, next to the online final.npz."""
+        maps/final_refined.npz, next to the online final.npz. After finish():
+        written right away."""
         self._save_map("final_refined", frame_idx, n_keyframes, gaussians)
 
     def _save_map(self, tag, frame_idx, n_keyframes, gaussians):
@@ -182,8 +262,7 @@ class RunRecorder:
         # Per-Gaussian light values (D121), e.g. extra_ambient_residual; maps
         # of original MonoGS (and the light-free test doubles) have none.
         extras = {f"extra_{name}": arr(t, np.float16) for name, t in getattr(gaussians, "_extras", {}).items()}
-        np.savez_compressed(
-            os.path.join(self.root, "maps", tag + ".npz"),
+        arrays = dict(
             **extras,
             frame_idx=np.int64(frame_idx),
             n_keyframes=np.int64(n_keyframes),
@@ -194,6 +273,12 @@ class RunRecorder:
             rotation=arr(gaussians.get_rotation, np.float16),
             kf_id=gaussians.unique_kfIDs.detach().cpu().numpy().astype(np.int32),
         )
+        path = os.path.join(self.root, "maps", tag + ".npz")
+        if self._writer is None:
+            np.savez_compressed(path, **arrays)
+        else:
+            # The copies above are done; the compression runs on the writer.
+            self._writer.submit(lambda: np.savez_compressed(path, **arrays))
 
     # ---- end of run ----
 
@@ -210,7 +295,11 @@ class RunRecorder:
                            + [f"{v:.7g}" for v in gt.ravel()])
         if gaussians is not None:
             self._save_map("final", frame_idx, len(kf_indices), gaussians)
-        self._file.close()
+        writer, self._writer = self._writer, None
+        try:
+            writer.close()
+        finally:
+            self._file.close()
 
 
 def open_recorder(config, dataset, shader, background):

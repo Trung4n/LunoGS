@@ -382,3 +382,28 @@ def test_learn_mask_only_on_learnable_and_matching_the_learned_tensor():
                   schedule=[{"after_keyframes": 0, "unfreeze": ["pose.R_CL"]}])
     with pytest.raises(NotImplementedError, match="2 tilts"):
         build_shader(cfg, PARAMS)
+
+
+def test_tilted_axis_without_gradient_is_cached_and_follows_new_values():
+    # Tracking reads the tilted light axis from one buffer, computed again
+    # only when the tilt changes (D135); mapping keeps the differentiable path.
+    shader = _both()
+    dev, dt = torch.device("cpu"), torch.float32
+    tilt = shader.learnable_params()["pose.R_CL"].tensor
+    shader.set_learning(False)
+    first = shader._light_axis(dev, dt)
+    torch.testing.assert_close(first, shader._tilted_axis(shader.axis, dev, dt))
+    assert shader._light_axis(dev, dt) is first
+    state = shader.learnable_state()
+    state["pose.R_CL"] = [2.0, -1.0]
+    shader.load_learnable_state(state)  # the values the backend sends
+    second = shader._light_axis(dev, dt)
+    assert second is first  # same buffer, new values
+    with torch.no_grad():
+        torch.testing.assert_close(second, shader._tilted_axis(shader.axis, dev, dt))
+    assert float((second - torch.tensor([0.0, 0.0, 1.0])).abs().max()) > 0
+    shader.set_learning(True)
+    moved = shader._light_axis(dev, dt)
+    assert moved.requires_grad and moved is not first
+    moved.sum().backward()
+    assert tilt.grad is not None

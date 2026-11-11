@@ -1,0 +1,16 @@
+# Speed (docs/DECISIONS.md D135): rgbd_lambert_selfcal_bootstrap.yaml run like
+# the main model's rgbd_lambert_calib_ambgrid_cell1p0_parallel_fused.yaml:
+# background mapping (sync_mode parallel, with --backend_gpu 1 on two GPUs),
+# the whole tracking iteration as one CUDA graph, shading + loss compiled
+# (Triton: GPU of compute capability >= 7.0 and a C compiler).
+inherit_from: "configs/light/rgbd_lambert_selfcal_bootstrap.yaml"
+
+Training:
+  sync_mode: parallel
+  cuda_graph_tracking: false
+  cuda_graph_iteration:
+    enabled: true
+    check_every: 2
+    raster_capacity_margin: 1.3
+    map_capacity_margin: 1.2
+    compile_shading: true
