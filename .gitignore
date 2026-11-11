@@ -21,6 +21,6 @@ CLAUDE.md
 docs/
 reports/
 
-monogs.ipynb
+*.ipynb
 
 .claude/

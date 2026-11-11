@@ -1,0 +1,8 @@
+# rgbd_lambert_selfcal_bootstrap_parallel_fused.yaml with tracking waiting for
+# every keyframe to be mapped (sync_mode hybrid, as the D113 selfcal run) but
+# with the fast tracking of D133-D136 (D137): does the selfcal ATE of D113
+# (1.86 cm) come back when the lamp gets the mapping of hybrid all along?
+inherit_from: "configs/light/rgbd_lambert_selfcal_bootstrap_parallel_fused.yaml"
+
+Training:
+  sync_mode: hybrid
