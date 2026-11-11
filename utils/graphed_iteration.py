@@ -127,14 +127,20 @@ class CompiledShadeLoss:
     forms, warm-ups) are fixed in the trace, exactly as in a recorded CUDA
     graph: it is traced again when the shader's graph_state changes."""
 
-    def __init__(self, config, shader, camera, albedo, depth, opacity):
+    def __init__(self, config, shader, camera, albedo, depth, opacity, loss=None):
+        """loss(render_pkg, camera) -> scalar; None = the tracking loss. The
+        colour refinement passes its own (utils/graphed_refinement.py, D136)."""
         from torch.fx.experimental.proxy_tensor import make_fx
+
+        if loss is None:
+            def loss(pkg, cam):
+                return get_loss_tracking(config, pkg, cam)
 
         def shade_loss(a, d, o):
             gbuffer = {"albedo": a, "depth": d, "opacity": o, "pixel_offset": RASTERIZER_PIXEL_OFFSET}
             pkg = {"depth": d, "opacity": o}
             apply_shading(pkg, gbuffer, shader, camera)
-            return get_loss_tracking(config, pkg, camera)
+            return loss(pkg, camera)
 
         example = [t.detach() for t in (albedo, depth, opacity)]
         gm = make_fx(shade_loss)(*example)

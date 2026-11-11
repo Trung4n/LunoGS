@@ -53,3 +53,18 @@ def test_saturated_observations_give_no_gradient():
     get_loss_refinement(_config(True), {"render": render}, vp, LAMBDA_DSSIM).backward()
     assert render.grad[:, :8, :8].abs().max() == 0          # masked: no pull on the albedo
     assert render.grad[:, 12:, 12:].abs().max() > 0         # elsewhere: refined as before
+
+
+def test_separable_ssim_equals_the_2d_window_one():
+    # D136: the refinement's SSIM applies the Gaussian window as two 1-D passes.
+    from gaussian_splatting.utils.loss_utils import ssim_separable
+
+    g = torch.Generator().manual_seed(3)
+    a = torch.rand(3, 37, 53, generator=g).cuda().requires_grad_()
+    b = torch.rand(3, 37, 53, generator=g).cuda()
+    ref = ssim(a, b)
+    got = ssim_separable(a, b)
+    torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-6)
+    ga, = torch.autograd.grad(ref, a)
+    gb, = torch.autograd.grad(got, a)
+    torch.testing.assert_close(gb, ga, rtol=1e-4, atol=1e-7)

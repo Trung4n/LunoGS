@@ -14,3 +14,12 @@ Training:
     raster_capacity_margin: 1.3
     map_capacity_margin: 1.2
     compile_shading: true
+
+Results:
+  # The offline colour refinement (albedo only) as a CUDA graph, shading +
+  # loss compiled (D136). Capacity: margin over the largest instance count of
+  # the keyframes, which is fixed while only colours are refined.
+  color_refinement_graph:
+    enabled: true
+    raster_capacity_margin: 1.1
+    compile_shading: true

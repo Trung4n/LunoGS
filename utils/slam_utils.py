@@ -1,6 +1,6 @@
 import torch
 
-from gaussian_splatting.utils.loss_utils import l1_loss, ssim
+from gaussian_splatting.utils.loss_utils import l1_loss, ssim_separable
 from light_models import read_light_tracking
 from utils.color_space import sRGB2Linear
 from utils.config_utils import require_key
@@ -444,7 +444,9 @@ def get_loss_refinement(config, render_pkg, viewpoint, lambda_dssim):
     weight = get_loss_weight(config, render_pkg, viewpoint, "mapping")
     if weight is not None:
         image, gt_image = image * weight, gt_image * weight
-    return (1.0 - lambda_dssim) * l1_loss(image, gt_image) + lambda_dssim * (1.0 - ssim(image, gt_image))
+    # SSIM with the Gaussian window as two 1-D passes: same value up to float
+    # rounding, several times faster (D136).
+    return (1.0 - lambda_dssim) * l1_loss(image, gt_image) + lambda_dssim * (1.0 - ssim_separable(image, gt_image))
 
 
 # Optimizer groups of GaussianModel.training_setup that the offline color

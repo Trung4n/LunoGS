@@ -8,3 +8,12 @@ inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell1p0_parallel_itergra
 Training:
   cuda_graph_iteration:
     compile_shading: true
+
+Results:
+  # The offline colour refinement (albedo only) as a CUDA graph, shading +
+  # loss compiled (D136). Capacity: margin over the largest instance count of
+  # the keyframes, which is fixed while only colours are refined.
+  color_refinement_graph:
+    enabled: true
+    raster_capacity_margin: 1.1
+    compile_shading: true

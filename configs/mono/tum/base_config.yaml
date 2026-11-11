@@ -15,6 +15,9 @@ Results:
   # Gaussian parameters the offline color refinement optimizes (optimizer
   # group names, D89); all six = original MonoGS.
   color_refinement_params: [xyz, f_dc, f_rest, opacity, scaling, rotation]
+  # The offline colour refinement replayed as a CUDA graph (only when it
+  # refines colours alone, the geometry fixed; docs/DECISIONS.md D136).
+  color_refinement_graph: {enabled: false}
   # Recording of the run for offline replay videos (utils/run_recorder.py,
   # tools/viz/render_replay.py, docs/DECISIONS.md D76). Off = original MonoGS;
   # slam.py --record switches it on. Logging only, never read by SLAM.

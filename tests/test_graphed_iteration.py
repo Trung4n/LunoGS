@@ -234,3 +234,30 @@ def test_lifted_constants_are_read_at_each_call():
     g1, = torch.autograd.grad(gm(xg, *consts), xg)
     g2, = torch.autograd.grad(fn(xg), xg)
     torch.testing.assert_close(g1, g2)
+
+
+# ------------------------------------------------------- colour refinement (D136)
+
+def test_refinement_graph_options():
+    from utils.graphed_refinement import read_refinement_graph
+
+    assert read_refinement_graph({"color_refinement_graph": {"enabled": False}}) is None
+    on = {"enabled": True, "raster_capacity_margin": 1.1, "compile_shading": True}
+    assert read_refinement_graph({"color_refinement_graph": on}) == {
+        "raster_capacity_margin": 1.1, "compile_shading": True}
+    with pytest.raises(KeyError):
+        read_refinement_graph({})
+    with pytest.raises(KeyError):
+        read_refinement_graph({"color_refinement_graph": {"enabled": True, "compile_shading": True}})
+    with pytest.raises(ValueError):
+        read_refinement_graph({"color_refinement_graph": dict(on, raster_capacity_margin=0.9)})
+    with pytest.raises(ValueError):
+        read_refinement_graph({"color_refinement_graph": {"enabled": False, "compile_shading": True}})
+
+
+def test_refinement_graph_refuses_geometry_groups():
+    from utils.graphed_refinement import GraphedRefinement
+
+    with pytest.raises(ValueError, match="geometry"):
+        GraphedRefinement({}, None, None, None, None, {}, ["f_dc", "xyz"], 0.2,
+                          {"raster_capacity_margin": 1.1, "compile_shading": False})

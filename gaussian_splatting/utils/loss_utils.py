@@ -99,3 +99,52 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+
+
+# ---- separable SSIM for the offline colour refinement (docs/DECISIONS.md D136)
+
+_WINDOWS_1D = {}
+
+
+def _window_1d(window_size, channel, device, dtype):
+    """(row, column) depthwise kernels of the 1-D Gaussian of create_window,
+    built once per device and dtype: create_window makes a CPU tensor and
+    copies it to the GPU at every call, which waits for the GPU."""
+    key = (window_size, channel, str(device), dtype)
+    w = _WINDOWS_1D.get(key)
+    if w is None:
+        g = gaussian(window_size, 1.5).to(device=device, dtype=dtype)
+        w = (g.view(1, 1, 1, window_size).expand(channel, 1, 1, window_size).contiguous(),
+             g.view(1, 1, window_size, 1).expand(channel, 1, window_size, 1).contiguous())
+        _WINDOWS_1D[key] = w
+    return w
+
+
+def ssim_separable(img1, img2, window_size=11):
+    """ssim(img1, img2) (mean over the map) with its 2-D Gaussian window, the
+    outer product of a 1-D one, applied as a row pass then a column pass:
+    the same sums up to float rounding (zero padding included), about
+    window_size / 2 times fewer operations. Used by the colour refinement;
+    the evaluation metric keeps ssim()."""
+    channel = img1.size(-3)
+    row, col = _window_1d(window_size, channel, img1.device, img1.dtype)
+    pad = window_size // 2
+
+    def blur(x):
+        x = F.conv2d(x, row, padding=(0, pad), groups=channel)
+        return F.conv2d(x, col, padding=(pad, 0), groups=channel)
+
+    mu1 = blur(img1)
+    mu2 = blur(img2)
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = blur(img1 * img1) - mu1_sq
+    sigma2_sq = blur(img2 * img2) - mu2_sq
+    sigma12 = blur(img1 * img2) - mu1_mu2
+    C1 = 0.01**2
+    C2 = 0.03**2
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+        (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    )
+    return ssim_map.mean()

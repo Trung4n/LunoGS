@@ -13,6 +13,7 @@ from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
 from utils.config_utils import require_key
+from utils.graphed_refinement import read_refinement_graph
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj, drain_queue
 from utils.pose_utils import update_pose
@@ -633,6 +634,18 @@ class BackEnd(mp.Process):
             self.shader.set_learning(False)
 
         iteration_total = 26000
+        graph_opts = read_refinement_graph(self.config["Results"])
+        if graph_opts is not None:
+            # The same iterations replayed as a CUDA graph (D136).
+            from utils.graphed_refinement import GraphedRefinement
+
+            keys = list(self.viewpoints.keys())
+            GraphedRefinement(
+                self.config, self.gaussians, self.shader, self.pipeline_params, self.background,
+                self.viewpoints, refined, self.opt_params.lambda_dssim, graph_opts,
+            ).run(iteration_total, lambda: random.randint(0, len(keys) - 1))
+            Log("Map refinement done")
+            return
         for iteration in tqdm(range(1, iteration_total + 1)):
             # Picks one random keyframe (same as random.choice).
             viewpoint_idx_stack = list(self.viewpoints.keys())
@@ -657,10 +670,9 @@ class BackEnd(mp.Process):
             loss = get_loss_refinement(self.config, render_pkg, viewpoint_cam, self.opt_params.lambda_dssim)
             loss.backward()
             with torch.no_grad():
-                self.gaussians.max_radii2D[visibility_filter] = torch.max(
-                    self.gaussians.max_radii2D[visibility_filter],
-                    radii[visibility_filter],
-                )
+                # torch.where: same values, no wait for the GPU (D136).
+                mr = self.gaussians.max_radii2D
+                mr.copy_(torch.where(visibility_filter, torch.maximum(mr, radii), mr))
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 self.gaussians.update_learning_rate(iteration)
