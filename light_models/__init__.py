@@ -14,7 +14,7 @@
 
 from types import SimpleNamespace
 
-from light_models.params import load_params_file, params_file_path
+from light_models.params import has_params_file, load_params_file, params_file_path
 from light_models.shaders import make_shader
 from utils.config_utils import require_key
 
@@ -52,6 +52,8 @@ def build_shader(config, params_data=None):
     def load_params():
         if params_data is not None:
             return params_data
+        if not has_params_file(config):
+            return None  # params_file: null (D142); a params_file source then fails
         return load_params_file(params_file_path(config))
 
     shader = make_shader(config["Light"], load_params)

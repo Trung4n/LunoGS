@@ -83,10 +83,21 @@ class ParamSpec:
         return t.requires_grad_(self.learnable)
 
 
+def has_params_file(config):
+    """False when Light.params_file is written as null: a model that reads no
+    value from a params file (the self-calibration, D142), so no file is
+    needed and any `source: params_file` is an error. The key itself is still
+    required: absent is an error, not "no file"."""
+    light = require_key(config, "Light", "")
+    return require_key(light, "params_file", "Light") is not None
+
+
 def params_file_path(config):
     """Light.params_file resolved against Dataset.dataset_path (D17)."""
     light = require_key(config, "Light", "")
     rel = require_key(light, "params_file", "Light")
+    if rel is None:
+        raise ValueError("Light.params_file is null: this config reads no params file")
     root = require_key(require_key(config, "Dataset", ""), "dataset_path", "Dataset")
     return os.path.join(root, rel)
 

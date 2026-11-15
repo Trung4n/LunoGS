@@ -67,7 +67,7 @@ class SLAM:
             # Same fail-fast for the albedo init strategy (resolved again
             # by the backend for each keyframe, see BackEnd.add_next_kf).
             get_albedo_init(self.config)
-            if save_dir is not None and "params_file" in self.config["Light"]:
+            if save_dir is not None and self.config["Light"].get("params_file") is not None:
                 # config.yml holds only the JSON keys; the values they resolve
                 # to are the per-scene params file, saved with the run
                 # (CLAUDE.md section 10: fully resolved configuration).

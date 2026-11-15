@@ -159,3 +159,27 @@ def test_perturb_combines_with_learnable():
     # A wrong starting value for a learned parameter (self-calibration later).
     s = _spec("K", {"scale": 1.2}, learnable=True, lr=0.01, prior_weight=0.0)
     assert s.learnable and s.value == pytest.approx(36.0)
+
+
+def test_null_params_file_means_no_file(tmp_path):
+    # D142: params_file: null = a model that reads no value from a file (the
+    # self-calibration); no file is opened, a params_file source fails.
+    from light_models import build_shader
+    from light_models.params import has_params_file
+
+    v = lambda x: {"source": "value", "value": x, "learnable": False}  # noqa: E731
+    light = {"enabled": True, "params_file": None, "shader": {"type": "colocated"}, "intensity": v(1.0),
+             "pose": {"t_CL": v([0.0, 0.0, 0.0]), "R_CL": v([[1, 0, 0], [0, 1, 0], [0, 0, 1]])},
+             "falloff": {"type": "inverse_square"}, "angular": {"type": "uniform"}, "cosine": {"type": "none"},
+             "ambient": {"type": "multiplicative_const", "c": v(0.1)}, "gbuffer": {"opacity_thr": 0.5}}
+    cfg = {"Training": {"spherical_harmonics": False}, "Dataset": {"dataset_path": str(tmp_path)}, "Light": light}
+    assert not has_params_file(cfg)
+    assert build_shader(cfg) is not None  # tmp_path holds no params file
+    with pytest.raises(ValueError, match="null"):
+        params_file_path(cfg)
+    light["intensity"] = {"source": "params_file", "key": "K", "learnable": False}
+    with pytest.raises(ValueError, match="no params file was loaded"):
+        build_shader(cfg)
+    del light["params_file"]
+    with pytest.raises(KeyError, match="params_file"):
+        build_shader(cfg)
