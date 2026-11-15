@@ -247,6 +247,8 @@ def test_light_config_set():
         "rgbd_lambert_selfcal_bootstrap_parallel_fused.yaml",
         "rgbd_lambert_selfcal_bootstrap_parallel_fused_wait40.yaml",
         "rgbd_lambert_selfcal_bootstrap_hybrid_fused.yaml",
+        "rgbd_lambert_selfcal_bootstrap_knots1_parallel_fused.yaml",
+        "rgbd_lambert_selfcal_bootstrap_region_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_cell1p0_parallel_fused_wait40.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p64_parallel_fused.yaml",

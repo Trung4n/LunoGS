@@ -1,0 +1,12 @@
+# rgbd_lambert_selfcal_bootstrap_knots1_parallel_fused.yaml with the scale of
+# Phi fixed by its mean over 2-10 deg instead of Phi(0) = 1
+# (docs/DECISIONS.md D141): the scale is then pinned by every pixel of that
+# band, not by the few pixels near the axis, so Phi cannot slide against the
+# albedo (D73). The band only sets the unit of Phi, not its shape. It leaves
+# out the knots at 0 and 1 deg (few pixels): an unobserved knot inside the
+# band moves the unit (CPU simulation, D141: band 0-48 deg failed).
+inherit_from: "configs/light/rgbd_lambert_selfcal_bootstrap_knots1_parallel_fused.yaml"
+
+Light:
+  angular:
+    scale: {_replace: true, type: region_mean, anchor_deg: [2, 10]}

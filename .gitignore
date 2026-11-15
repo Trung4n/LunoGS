@@ -24,3 +24,4 @@ reports/
 *.ipynb
 
 .claude/
+baselines/

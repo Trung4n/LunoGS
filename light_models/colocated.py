@@ -74,6 +74,10 @@ class ColocatedShader:
         self.angular = build_component(
             "angular", require_key(light_cfg, "angular", where), "Light.angular", params_data
         )
+        if getattr(self.angular, "scale", None) == "free" and intensity.learnable:
+            # The knots of a free-scale spline carry K x Phi (D140): a learned
+            # K would bring back the K / Phi scale they remove.
+            raise ValueError("Light.angular.scale: free needs a fixed Light.intensity (learnable: false)")
         self.cosine = build_component(
             "cosine", require_key(light_cfg, "cosine", where), "Light.cosine", params_data
         )

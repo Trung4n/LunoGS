@@ -1,0 +1,14 @@
+# Synthetic calibration clip with a NARROW lamp (docs/DECISIONS.md D140):
+# synthetic_office0_lamp.yaml with the profile replaced by a generic spot
+# flat up to 5 deg and dark from 12 deg on. Its core ends inside the 8-deg
+# first segment of fit_spline_core_coarse.yaml, which that knot layout cannot
+# follow; the test lamp of the free-scale spline (fit_spline_free.yaml).
+# Values of this test lamp, not of any dataset.
+inherit_from: "configs/calib/synthetic_office0_lamp.yaml"
+
+Light:
+  angular:
+    _replace: true
+    type: smoothstep
+    theta_in: {source: value, value: 5.0, learnable: false}
+    theta_out: {source: value, value: 12.0, learnable: false}

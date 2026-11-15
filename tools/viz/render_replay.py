@@ -267,6 +267,16 @@ def spline_knots_deg(config):
     return angular.get("knots_deg")
 
 
+def phi_at_knots(values, knots_deg):
+    """Phi at every knot from the logged angular.knot_values: the values at
+    knots_deg[1:] after Phi(0) = 1 (scale unit_at_zero), or at every knot
+    (free, region_mean: as many values as knots, D140, D141)."""
+    values = list(values)
+    if knots_deg is not None and len(values) == len(knots_deg):
+        return values
+    return [1.0] + values
+
+
 def linear_to_srgb(x):
     return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 0.0031308), 1 / 2.4) - 0.055)
 
@@ -557,11 +567,14 @@ def light_panel(run, n_kf, size):
         if k not in ("frame_idx", "n_keyframes") and not k.startswith("angular.knot_values["):
             lines.append(f"{k} {float(v):.4g}")
     if knots:
-        # knot_values[i] is Phi at knots_deg[i + 1] (Phi(0) = 1 fixed), see
-        # angular.Spline; without config.yml the x axis is the knot index.
-        xs = [float(x) for x in run.knots_deg] if run.knots_deg else [0.0] + [i + 1.0 for i, _ in knots]
+        # Phi at the knots (phi_at_knots: with or without Phi(0) = 1 logged),
+        # see angular.Spline; without config.yml the x axis is the knot index.
+        ys = phi_at_knots([v for _, v in knots], run.knots_deg)
+        xs = [float(x) for x in run.knots_deg] if run.knots_deg else [float(i) for i in range(len(ys))]
         unit = "deg" if run.knots_deg else "knot"
-        ys = [1.0] + [v for _, v in knots]
+        top = max(ys)
+        if top > 1.0:  # region_mean: the core may lie above 1; drawn relative to its top
+            ys = [y / top for y in ys]
         x0, y0, x1, y1 = 40, 50, w - 10, h - 25
         cv2.rectangle(img, (x0, y0), (x1, y1), (90, 90, 90), 1)
         pts = [(int(x0 + (x1 - x0) * x / xs[-1]), int(y1 - (y1 - y0) * y)) for x, y in zip(xs, ys)]

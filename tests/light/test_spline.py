@@ -24,9 +24,10 @@ def _spot(half, blend=0.35):
             "blend": {"source": "value", "value": blend, "learnable": False}}
 
 
-def _spline_block(knots, init, learn=None, smoothness=0.0):
+def _spline_block(knots, init, learn=None, smoothness=0.0, scale=None):
     return {"type": "spline", "knots_deg": knots, "interpolation": "linear_cos",
-            "learn": learn or {"learnable": False}, "smoothness_weight": smoothness, "init": init}
+            "learn": learn or {"learnable": False}, "smoothness_weight": smoothness, "init": init,
+            "scale": scale or {"type": "unit_at_zero"}}
 
 
 def _cos(deg):
@@ -165,6 +166,93 @@ def _config(angular, schedule=None):
     if schedule:
         light["schedule"] = schedule
     return {"Training": {"spherical_harmonics": False}, "Light": light}
+
+
+# ---- scale of Phi (D140) ---------------------------------------------------------
+
+LEARN = {"learnable": True, "lr": 0.01, "prior_weight": 0.0}
+
+
+def test_scale_is_required_and_checked():
+    block = _spline_block([0, 10, 20], {"type": "uniform"})
+    del block["scale"]
+    with pytest.raises(KeyError, match="scale"):
+        build_component("angular", block, "Light.angular", None)
+    block["scale"] = "max"
+    with pytest.raises(ValueError, match="scale"):
+        build_component("angular", block, "Light.angular", None)
+
+
+def test_free_scale_learns_every_knot_with_no_upper_bound():
+    sp = build_component("angular", _spline_block([0, 10, 20, 30], _spot(25.0), LEARN, scale={"type": "free"}),
+                         "Light.angular", None)
+    # Every knot is stored, Phi(0) included, starting from the init / init(0).
+    assert sp.knot_values.numel() == 4
+    assert float(sp.values()[0]) == 1.0
+    with torch.no_grad():
+        sp.knot_values.copy_(torch.tensor([3.0, 3.2, 1.0, 0.5]))
+    sp.project()  # non-increasing, >= 0, not clipped to 1
+    torch.testing.assert_close(sp.values(), torch.tensor([3.1, 3.1, 1.0, 0.5]))
+    assert float(sp(_cos(0.0))) == pytest.approx(3.1)
+    sp.check_values()
+    with torch.no_grad():
+        sp.knot_values.copy_(torch.tensor([3.0, 1.0, 0.5, -0.1]))
+    with pytest.raises(ValueError, match=">= 0"):
+        sp.check_values()
+    with pytest.raises(ValueError, match="unit_at_zero"):
+        sp.restart_from(lambda c: torch.ones_like(c))
+
+
+def test_unit_scale_still_clips_to_one():
+    sp = build_component("angular", _spline_block([0, 10, 20], {"type": "uniform"}, LEARN), "Light.angular", None)
+    with torch.no_grad():
+        sp.knot_values.copy_(torch.tensor([1.4, 0.3]))
+    sp.project()
+    torch.testing.assert_close(sp.values(), torch.tensor([1.0, 1.0, 0.3]))
+
+
+def test_free_scale_refuses_a_learned_intensity():
+    cfg = _config(_spline_block([0, 10, 20], {"type": "uniform"}, LEARN, scale={"type": "free"}),
+                  [{"after_keyframes": 0, "unfreeze": ["intensity", "angular.knot_values"]}])
+    cfg["Light"]["intensity"] = {"source": "value", "value": 30.0, "learnable": True, "lr": 0.1, "prior_weight": 0.0}
+    with pytest.raises(ValueError, match="free needs a fixed Light.intensity"):
+        build_shader(cfg, {})
+    cfg["Light"]["intensity"] = {"source": "value", "value": 30.0, "learnable": False}
+    cfg["Light"]["schedule"] = [{"after_keyframes": 0, "unfreeze": ["angular.knot_values"]}]
+    assert sorted(build_shader(cfg, {}).learnable_params()) == ["angular.knot_values"]
+
+
+def test_region_mean_scale_is_fixed_by_the_band():
+    # D141: Phi = v / mean(v over the anchor band); every knot learned.
+    region = {"type": "region_mean", "anchor_deg": [0, 10]}
+    sp = build_component("angular", _spline_block([0, 5, 10, 20, 30], _spot(15.0), LEARN, scale=region),
+                         "Light.angular", None)
+    assert sp.knot_values.numel() == 5
+    assert float(sp.values()[:3].mean()) == pytest.approx(1.0)
+    c = _cos(torch.tensor([0.0, 7.0, 14.0, 25.0]))
+    before = sp(c.float()).detach().clone()
+    with torch.no_grad():
+        sp.knot_values.mul_(3.7)  # the scale of the knots is not observable
+    torch.testing.assert_close(sp(c.float()).detach(), before)
+    # ... so the gradient has no component along it.
+    sp(c.float()).sum().backward()
+    assert float((sp.knot_values.grad * sp.knot_values.detach()).sum()) == pytest.approx(0.0, abs=1e-5)
+    sp.project()  # back to mean 1 over the band, Phi unchanged
+    assert float(sp.knot_values[:3].mean()) == pytest.approx(1.0)
+    torch.testing.assert_close(sp(c.float()).detach(), before)
+    # The first-frame estimate (D112) restarts it in the same unit.
+    sp.restart_from(lambda cos: torch.ones_like(cos))
+    torch.testing.assert_close(sp.values().detach(), torch.ones(5))
+
+
+def test_region_mean_needs_a_band_with_knots():
+    for scale, match in [({"type": "region_mean"}, "anchor_deg"),
+                         ({"type": "region_mean", "anchor_deg": [12, 18]}, "no knot"),
+                         ({"type": "region_mean", "anchor_deg": [10, 0]}, "lo <= hi"),
+                         ({"type": "unit_at_zero", "anchor_deg": [0, 10]}, "exactly the keys")]:
+        with pytest.raises(ValueError, match=match):
+            build_component("angular", _spline_block([0, 10, 20], {"type": "uniform"}, LEARN, scale=scale),
+                            "Light.angular", None)
 
 
 @pytest.mark.parametrize("init", [_spot(34.0), {"type": "uniform"}], ids=["wider_cone", "flat"])

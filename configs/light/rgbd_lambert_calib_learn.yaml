@@ -20,6 +20,7 @@ Light:
     # 2-deg knots near the axis let K and the first segment trade off (D106).
     knots_deg: [0, 8, 14, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 36, 40, 45, 50]
     interpolation: linear_cos
+    scale: {type: unit_at_zero}  # Phi(0) = 1 fixed (D140)
     init:
       type: tabulated
       knots_deg: {source: params_file, key: light.angular.knots_deg, learnable: false}

@@ -255,8 +255,19 @@ def light_values(shader, light_cfg, params_data):
     else:
         r = r_init
     axis = r[:, 2] / r[:, 2].norm()
+    k = shader.intensity.detach().to(torch.float64)
+    phi_scale = 1.0
+    if getattr(shader.angular, "scale", "unit_at_zero") != "unit_at_zero":
+        # Spline with every knot learned (D140, D141): free holds
+        # K x Phi / K_fixed, region_mean Phi in the unit of its band. Exported
+        # in the usual shape, K on the axis and Phi(0) = 1, so that a SLAM
+        # config reads it as any other result; only the product is measured.
+        phi_scale = float(shader.angular.values()[0].detach())
+        if not phi_scale > 0:
+            raise ValueError(f"free-scale spline: Phi(0) = {phi_scale!r}, cannot normalise")
+        k = k * phi_scale
     out = {
-        "intensity": _value(shader.intensity.view(-1)) if shader.intensity.numel() > 1 else float(shader.intensity),
+        "intensity": k.view(-1).tolist() if k.numel() > 1 else float(k),
         "t_CL_m": _value(shader.t_CL),
         "R_CL": r.tolist(),
         "light_axis_tilt_deg": [math.degrees(math.atan2(float(axis[0]), float(axis[2]))),
@@ -268,7 +279,10 @@ def light_values(shader, light_cfg, params_data):
             block[name] = _value(getattr(comp, name))
         if hasattr(comp, "knot_values"):  # spline (D67)
             block["knots_deg"] = list(comp.knots_deg)
-            block["knot_values"] = _value(comp.values())
+            block["knot_values"] = [x / phi_scale for x in _value(comp.values())]
+            block["scale"] = comp.scale
+            if comp.scale != "unit_at_zero":
+                block["phi0_before_normalisation"] = phi_scale
         out[kind] = block
     amb = {"type": light_cfg["ambient"]["type"]}
     for name in getattr(shader.ambient, "_param_specs", {}):

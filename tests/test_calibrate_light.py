@@ -121,6 +121,50 @@ def test_synthetic_clip_recovers_the_lamp(tmp_path, loss_space):
     assert got["ambient_of_calibration_room"]["c"] == pytest.approx(PARAMS["c"], rel=0.05)
 
 
+def test_free_scale_spline_recovers_k_times_phi(tmp_path):
+    # D140: free-scale spline (every knot learned, K fixed at a wrong guess),
+    # uniform 2 deg knots, t_CL from the camera centre: the clip fixes
+    # K x Phi at every angle with pixels, with no K / Phi(0) trade-off; the
+    # export puts it back as K on the axis and Phi(0) = 1.
+    # The stages of configs/calib (300/600/600): with 150/300/300 the axis
+    # tilt stays ~0.5 deg off on this small clip, unit_at_zero as well (D140).
+    synthetic = {"intrinsics": INTR, "depth_scale": 6553.5, "n_frames": 16, "distance_m": [0.8, 4.0],
+                 "max_tilt_deg": 60, "target_albedo": [0.05, 0.05, 0.05], "jpeg_quality": None,
+                 "depth_noise_m": 0.0, "seed": 0}
+    truth = ms.make({"Light": _light(False), "Synthetic": synthetic}, PARAMS, str(tmp_path), log=lambda s: None)
+    truth = truth["light"]
+
+    from light_models.shaders import make_shader
+
+    light = _light(True)
+    knots = list(range(0, 52, 2))
+    light["intensity"] = {"source": "value", "value": 10.0, "learnable": False}
+    light["pose"]["t_CL"] = {"source": "value", "value": [0.0, 0.0, 0.0], "learnable": True, "lr": 0.0002,
+                             "prior_weight": 0.0}
+    light["angular"] = {"type": "spline", "knots_deg": knots, "interpolation": "linear_cos",
+                        "init": {"type": "uniform"}, "learn": {"learnable": True, "lr": 0.02, "prior_weight": 0.0},
+                        "smoothness_weight": 0.0, "scale": {"type": "free"}}
+    light["schedule"] = [{"after_keyframes": 0, "unfreeze": ["ambient.c", "angular.knot_values"]},
+                         {"after_keyframes": 1, "unfreeze": ["pose.R_CL"]},
+                         {"after_keyframes": 2, "unfreeze": ["pose.t_CL"]}]
+    calib = fl.read_calibration({"Calibration": calib_block(stages=[300, 600, 600])})
+    shader = make_shader(light, lambda: PARAMS)
+    intr, frames = fl.load_clip(str(tmp_path))
+    fl.fit(shader, fl.prepare(frames, intr, calib, "cpu"), intr, calib, log=lambda s: None)
+    got = fl.light_values(shader, light, PARAMS)
+
+    assert got["angular"]["scale"] == "free" and got["angular"]["knot_values"][0] == pytest.approx(1.0)
+    spot = make_shader(_light(False), lambda: PARAMS).angular
+    cos = torch.cos(torch.tensor(knots, dtype=torch.float64) * (math.pi / 180.0))
+    k_phi_true = truth["intensity"] * spot(cos).numpy()
+    k_phi_got = got["intensity"] * np.array(got["angular"]["knot_values"])
+    core = [i for i, k in enumerate(knots) if 4 <= k <= 22]
+    np.testing.assert_allclose(k_phi_got[core], k_phi_true[core], rtol=0.03)
+    np.testing.assert_allclose(got["light_axis_tilt_deg"], truth["light_axis_tilt_deg"], atol=0.3)
+    # 1 cm on 80 x 46 pixels (t_CL z ~8 mm off); full-size clips: <= 0.3 mm (D140).
+    np.testing.assert_allclose(got["t_CL_m"], truth["t_CL_m"], atol=0.01)
+
+
 def test_fit_refuses_a_schedule_with_more_stages_than_configured(tmp_path):
     from light_models.shaders import make_shader
 

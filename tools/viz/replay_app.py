@@ -157,8 +157,9 @@ class AppRun:
             scalars = {k: float(v) for k, v in row.items()
                        if k not in ("frame_idx", "n_keyframes") and not k.startswith("angular.knot_values[")}
             out.append({"frame": int(row["frame_idx"]), "n_keyframes": int(row["n_keyframes"]),
-                        # knot i is at (i + 1) degrees, Phi(0) = 1 fixed (angular.Spline)
-                        "phi": [1.0] + [v for _, v in knots] if knots else None, "scalars": scalars})
+                        # Phi at every knot, Phi(0) = 1 prepended when not logged (angular.Spline)
+                        "phi": rr.phi_at_knots([v for _, v in knots], self.run.knots_deg) if knots else None,
+                        "scalars": scalars})
         return out
 
     def summary(self):

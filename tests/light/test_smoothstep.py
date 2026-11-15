@@ -45,7 +45,7 @@ def test_spline_can_start_from_it():
     spline = build_component("angular", {
         "type": "spline", "knots_deg": [0, 10, 30, 50], "interpolation": "linear_cos",
         "learn": {"learnable": True, "lr": 0.01, "prior_weight": 0.0}, "smoothness_weight": 0.0,
-        "init": block()}, "Light.angular", None)
+        "init": block(), "scale": {"type": "unit_at_zero"}}, "Light.angular", None)
     torch.testing.assert_close(spline.values().double(), torch.tensor([1.0, 1.0, 0.5, 0.0], dtype=torch.float64),
                                atol=1e-5, rtol=0)
 

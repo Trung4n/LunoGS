@@ -47,7 +47,8 @@ def light(angular, cosine=None, profile_bootstrap=None):
 
 def spline_block():
     return {"type": "spline", "knots_deg": KNOTS, "interpolation": "linear_cos", "init": {"type": "uniform"},
-            "learn": {"learnable": True, "lr": 0.01, "prior_weight": 0.0}, "smoothness_weight": 0.0}
+            "learn": {"learnable": True, "lr": 0.01, "prior_weight": 0.0}, "smoothness_weight": 0.0,
+            "scale": {"type": "unit_at_zero"}}
 
 
 def spot(half=30.0, blend=0.35):

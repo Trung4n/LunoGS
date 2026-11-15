@@ -1,0 +1,23 @@
+# Pre-calibration with a FREE-SCALE spline (docs/DECISIONS.md D140): every
+# knot value is learned, Phi(0) included, and K is FIXED at the guess of
+# fit_spot_datasheet.yaml, so the knots carry K x Phi / K_guess and no K / Phi
+# scale is left to trade (the gauge that needed the 8-deg first segment of
+# fit_spline_core_coarse.yaml, D106). Uniform 1-deg knots: no assumption on
+# where the core ends or where the edge falls. fit_light.py exports K x Phi(0)
+# as the intensity and Phi / Phi(0) as the table, the usual shape.
+#
+# lr is absolute on values of order K_true / K_guess (about 3 for the Replica
+# lamps from the guess 10): TO CONFIRM for a guess far off.
+inherit_from: "configs/calib/fit_spline_no_tcl.yaml"
+
+Light:
+  intensity: {_replace: true, source: value, value: 10.0, learnable: false}
+  angular:
+    knots_deg: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+    scale: {type: free}
+    learn: {learnable: true, lr: 0.02, prior_weight: 0.0}
+    smoothness_weight: 0.0
+  schedule:  # a list replaces the inherited one as a whole; no intensity
+    - {after_keyframes: 0, unfreeze: [ambient.c, angular.knot_values]}
+    - {after_keyframes: 1, unfreeze: [pose.R_CL]}
+    - {after_keyframes: 2, unfreeze: [pose.t_CL]}
