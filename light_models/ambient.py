@@ -629,7 +629,21 @@ class PositionGridGrowing(MultiplicativeConst):
     # ---- shading ----
 
     def field(self, points_world):
-        """(channels,H,W) r at the (3,H,W) world points; 0 outside the box."""
+        """(channels,H,W) r at the (3,H,W) world points; 0 outside the box.
+        While the values learn (mapping, eager, the box read on the host),
+        the box is a plain dense grid and grid_sample does the lookup, as
+        position_grid: the generic path below costs 2x per render there
+        (D144). Otherwise (tracking, refinement: fixed buffers for the CUDA
+        graphs and the compiled shading, no host read of the box) the
+        address of each corner is computed. Same values either way
+        (tests/light/test_ambient_position_grid_growing.py)."""
+        if self.residual.requires_grad and torch.is_grad_enabled():
+            return self._field_dense_view(points_world)
+        return self._field_addresses(points_world)
+
+    def _field_addresses(self, points_world):
+        """field() by computing each corner's address in the buffer: no host
+        read, fixed shapes (CUDA graphs, compiled shading)."""
         dev, dt = points_world.device, points_world.dtype
         _, h, w = points_world.shape
         base, frac = _cell_index(points_world.reshape(3, -1), self.cell_m)
@@ -653,6 +667,25 @@ class PositionGridGrowing(MultiplicativeConst):
         corner = (side[2] * box[4] + side[1]) * box[3] + side[0]
         flat = (flat0[None] + corner[:, None]).clamp(0, self.capacity - 1)
         return _gather_corners(values, flat, weight).view(-1, h, w)
+
+    def _field_dense_view(self, points_world):
+        """field() through grid_sample on the box's part of the buffer, viewed
+        as a (channels, nz, ny, nx) grid (the buffer's flat order is z, y, x).
+        Vertex i of an axis sits at -1 + 2 i / (n - 1) (align_corners), a
+        point outside reads 0 (padding zeros), as the generic path."""
+        dev, dt = points_world.device, points_world.dtype
+        x0, y0, z0, nx, ny, nz = self.box.tolist()
+        values = on_device(self.residual, dev, dt)
+        c = values.shape[0]
+        if nx * ny * nz == 0:
+            return torch.zeros((c,) + points_world.shape[1:], device=dev, dtype=dt)
+        grid = values[:, :nx * ny * nz].view(1, c, nz, ny, nx)
+        coords = []
+        for a, (lo, n) in enumerate(((x0, nx), (y0, ny), (z0, nz))):
+            u = points_world[a] / self.cell_m - lo  # in vertex units, 0 at the box's first vertex
+            coords.append(u * (2.0 / (n - 1)) - 1.0)
+        coords = torch.stack(coords, -1)[None, None]  # (1,1,H,W,3): x, y, z
+        return F.grid_sample(grid, coords, mode="bilinear", padding_mode="zeros", align_corners=True)[0, :, 0]
 
     def __call__(self, albedo, direct, points_world):
         return _shade_field(self, albedo, direct, self.field(points_world.detach()))

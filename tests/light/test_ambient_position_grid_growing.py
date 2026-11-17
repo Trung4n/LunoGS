@@ -336,3 +336,33 @@ def test_compiled_lookup_reads_a_grown_box():
         got = got[0]
     torch.testing.assert_close(got, want, atol=1e-6, rtol=0)
     assert want.abs().max() > 0.1
+
+
+def test_mapping_and_tracking_paths_agree():
+    # Mapping (values learning) looks up through grid_sample on the box,
+    # tracking through computed addresses: same values and the same
+    # gradient, inside and outside the box (D144).
+    torch.manual_seed(0)
+    amb = _growing(margin_m=0.5).ambient
+    amb.allocate(torch.tensor([[0.1, 1.3], [-0.4, 0.6], [0.2, 0.9]]))
+    amb.allocate(_point(-1.7, 0.1, 0.4))  # grows: a non-trivial origin
+    n = amb.n_vertices
+    with torch.no_grad():
+        amb.residual[0, :n] = torch.randn(n)
+    lo = torch.tensor([-3.0, -2.0, -1.5]).view(3, 1, 1)
+    pts = lo + torch.rand(3, 7, 9) * torch.tensor([6.0, 4.5, 4.0]).view(3, 1, 1)  # some outside
+    weights = torch.rand(1, 7, 9)
+    results = {}
+    for name, path in (("grid_sample", amb._field_dense_view), ("addresses", amb._field_addresses)):
+        amb.residual.grad = None
+        r = path(pts)
+        (r * weights).sum().backward()
+        results[name] = (r.detach(), amb.residual.grad.clone())
+    (r_g, g_g), (r_a, g_a) = results["grid_sample"], results["addresses"]
+    torch.testing.assert_close(r_g, r_a, atol=1e-6, rtol=0)
+    torch.testing.assert_close(g_g, g_a, atol=1e-6, rtol=0)
+    assert r_a.abs().max() > 0.1 and (r_a == 0).any()  # inside and outside
+    # field() picks grid_sample while the values learn, addresses otherwise.
+    with torch.no_grad():
+        torch.testing.assert_close(amb.field(pts), r_a)
+    torch.testing.assert_close(amb.field(pts).detach(), r_g)
