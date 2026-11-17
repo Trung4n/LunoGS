@@ -280,12 +280,203 @@ class PositionGrid(MultiplicativeConst):
         points_world = points_world.detach()
         # Kept as a tensor: float() here would synchronize every render (D128).
         self._outside_frac = (points_world.abs() > self.half_extent_m).any(0).float().mean()
-        r = self.field(points_world)
-        c = on_device(self.c, albedo.device, albedo.dtype)
-        radiance = albedo * (_direct3(direct) + (c + r).clamp_min(0.0))
-        fixed_c = c.detach()
-        m = albedo.detach() * ((fixed_c + r).clamp_min(0.0) - fixed_c)
-        return radiance, {"ambient_residual": m, "map_penalty": self.l1_weight * m.abs().mean()}
+        return _shade_field(self, albedo, direct, self.field(points_world))
+
+
+def _shade_field(amb, albedo, direct, r):
+    """Radiance and the mapping penalty of an ambient field r (channels,H,W)
+    over the scene, E = max(c + r, 0) (position_grid, position_grid_sparse)."""
+    c = on_device(amb.c, albedo.device, albedo.dtype)
+    radiance = albedo * (_direct3(direct) + (c + r).clamp_min(0.0))
+    fixed_c = c.detach()
+    m = albedo.detach() * ((fixed_c + r).clamp_min(0.0) - fixed_c)
+    return radiance, {"ambient_residual": m, "map_penalty": amb.l1_weight * m.abs().mean()}
+
+
+# Vertex keys of position_grid_sparse: the integer vertex coordinates packed
+# into one int64, _KEY_BITS bits per axis, offset so that negative indices fit.
+# A layout of the key, not a setting: |index| < 2**20 cells is about 500 km
+# at 0.5 m cells; the allocation refuses points beyond (never silently).
+_KEY_BITS = 21
+_KEY_OFFSET = 1 << (_KEY_BITS - 1)
+_KEY_PAD = torch.iinfo(torch.int64).max  # sorts after every key; never a vertex
+_CORNERS = [(dx, dy, dz) for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)]
+
+
+def _cell_index(points, cell_m):
+    """(3,P) world points -> (3,P) int64 index of the cell holding each point,
+    and (3,P) the position inside the cell in [0, 1)."""
+    scaled = points / cell_m
+    base = torch.floor(scaled)
+    return base.to(torch.int64), scaled - base
+
+
+def _pack(index):
+    """(3,P) int64 vertex indices -> (P,) int64 keys."""
+    shifted = index + _KEY_OFFSET
+    return (shifted[0] << (2 * _KEY_BITS)) | (shifted[1] << _KEY_BITS) | shifted[2]
+
+
+@register("ambient", "position_grid_sparse", numeric=("c",),
+          options=("channels", "cell_m", "capacity", "residual_lr", "l1_weight"))
+class PositionGridSparse(MultiplicativeConst):
+    """position_grid whose vertices exist only where the map has been seen
+    (docs/DECISIONS.md D143): the same field E(x) = max(c + r(x), 0), r
+    trilinear on vertices every `cell_m` in the WORLD frame, but with no
+    bounding cube. A vertex is allocated when a shading point of a keyframe
+    (every pixel the rasterized map covers; BackEnd.add_next_kf, through
+    ColocatedShader.observe_surface) falls in one
+    of the 8 cells around it; memory follows the surface seen, not the volume
+    of a cube fixed in advance.
+
+    Storage: a pool of `capacity` vertices (a fixed size, so that the CUDA
+    graphs and the compiled shading of tracking keep reading the same buffers,
+    D130-D134). `residual` (channels, capacity) holds the values, in
+    allocation order: a vertex keeps its slot, so Adam's state stays attached
+    to it. `keys_sorted` / `slot_of_sorted` (capacity,) are the allocated keys
+    sorted, padded with a key larger than any vertex, and the slot of each:
+    a lookup is a binary search (bucketize). A vertex not allocated reads 0,
+    exactly as an untouched vertex of position_grid, so with every vertex the
+    surface touches allocated the two forms shade identically. Filling the
+    pool is an error, not a silent drop.
+
+    Learning, penalty, detached lookup position, frontend sync: as
+    position_grid. Only the backend allocates; the frontend receives the keys
+    with the learned values (aux_state)."""
+
+    world_field = True
+    RESIDUAL = "residual"
+    KEYS = "residual_keys"
+
+    def __init__(self, c, channels, cell_m, capacity, residual_lr, l1_weight):
+        super().__init__(c)
+        if channels not in (1, 3) or isinstance(channels, bool):
+            raise ValueError(f"Light.ambient.channels must be 1 or 3, got {channels!r}")
+        for name, v in (("cell_m", cell_m), ("residual_lr", residual_lr), ("l1_weight", l1_weight)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+                raise ValueError(f"Light.ambient.{name} must be a positive number, got {v!r}")
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 8:
+            raise ValueError(f"Light.ambient.capacity must be an integer >= 8 (one cell), got {capacity!r}")
+        self.cell_m = float(cell_m)
+        self.capacity = capacity
+        self.residual_lr = float(residual_lr)
+        self.l1_weight = float(l1_weight)
+        self.residual = torch.zeros(channels, capacity, dtype=torch.float32, requires_grad=True)
+        self.slot_keys = torch.full((capacity,), _KEY_PAD, dtype=torch.int64)  # key of each slot
+        self.keys_sorted = torch.full((capacity,), _KEY_PAD, dtype=torch.int64)
+        self.slot_of_sorted = torch.zeros(capacity, dtype=torch.int64)
+        self.n_allocated = 0
+        # Key offset of each of the 8 cell corners, a tensor so that its GPU
+        # copy is made once (on_device).
+        self._corner_key_offsets = torch.tensor(
+            [(dx << (2 * _KEY_BITS)) | (dy << _KEY_BITS) | dz for dx, dy, dz in _CORNERS],
+            dtype=torch.int64).view(-1, 1)
+
+    # ---- learning and sync ----
+
+    def learnable_extra(self, prefix):
+        from light_models.learning import LearnableParam
+
+        path = f"{prefix}.{self.RESIDUAL}"
+        return {path: LearnableParam(path, self.residual, self.residual.detach().clone(),
+                                     self.residual_lr, 0.0, summary=self.residual_summary)}
+
+    def residual_summary(self):
+        r = self.residual.detach()[:, :self.n_allocated]
+        moved = r != 0
+        return {"abs_mean_moved": float(r[moved].abs().mean()) if moved.any() else 0.0,
+                "min": float(r.min()) if r.numel() else 0.0, "max": float(r.max()) if r.numel() else 0.0,
+                "vertices_moved": float(moved.any(0).sum()),
+                "vertices_allocated": float(self.n_allocated),
+                "capacity_used": self.n_allocated / self.capacity}
+
+    def aux_state(self):
+        """Non-learned state the frontend and the logs need besides the
+        values: the key of every allocated slot, in slot order."""
+        return {self.KEYS: self.slot_keys[:self.n_allocated].tolist()}
+
+    def load_aux_state(self, state):
+        keys = state[self.KEYS]
+        if len(keys) > self.capacity:
+            raise ValueError(f"Light.ambient: {len(keys)} vertices received, capacity is {self.capacity}")
+        with torch.no_grad():
+            self.slot_keys.fill_(_KEY_PAD)
+            if keys:
+                self.slot_keys[:len(keys)] = torch.tensor(keys, dtype=torch.int64)
+        self.n_allocated = len(keys)
+        self._sort_keys()
+
+    def own_storage(self):
+        """Private storage for the key buffers (see
+        ColocatedShader.own_learnable_storage)."""
+        for name in ("slot_keys", "keys_sorted", "slot_of_sorted"):
+            setattr(self, name, getattr(self, name).clone())
+
+    def _sort_keys(self):
+        # In place: the GPU copies (on_device) stay at one address (D130).
+        with torch.no_grad():
+            order = torch.argsort(self.slot_keys)
+            self.keys_sorted.copy_(self.slot_keys[order])
+            self.slot_of_sorted.copy_(order)
+
+    # ---- allocation (backend) ----
+
+    def allocate(self, points_world):
+        """Allocates the vertices of the cells holding the (3,P) world points
+        (surface points of a keyframe). Returns the number of new vertices."""
+        if points_world.shape[1] == 0:
+            return 0
+        with torch.no_grad():
+            base, _ = _cell_index(points_world.detach().to(torch.float32), self.cell_m)
+            cells = torch.unique(base, dim=1)
+            if bool((cells.abs() >= _KEY_OFFSET - 1).any()):
+                raise ValueError(
+                    f"Light.ambient: surface points beyond {(_KEY_OFFSET - 1) * self.cell_m:g} m from the "
+                    "world origin cannot be keyed")
+            corners = torch.cat([cells + torch.tensor(d, device=cells.device).view(3, 1) for d in _CORNERS], 1)
+            keys = torch.unique(_pack(corners)).cpu()
+            known = self.keys_sorted
+            pos = torch.bucketize(keys, known).clamp_max(self.capacity - 1)
+            new = keys[known[pos] != keys]
+            n_new = int(new.numel())
+            if self.n_allocated + n_new > self.capacity:
+                raise RuntimeError(
+                    f"Light.ambient.capacity {self.capacity} exceeded: {self.n_allocated} vertices "
+                    f"allocated, {n_new} more needed; raise the capacity")
+            if n_new:
+                self.slot_keys[self.n_allocated:self.n_allocated + n_new] = new
+                self.n_allocated += n_new
+                self._sort_keys()
+        return n_new
+
+    # ---- shading ----
+
+    def field(self, points_world):
+        """(channels,H,W) r at the (3,H,W) world points; 0 at vertices not
+        allocated."""
+        dev, dt = points_world.device, points_world.dtype
+        _, h, w = points_world.shape
+        base, frac = _cell_index(points_world.reshape(3, -1), self.cell_m)
+        keys = on_device(self.keys_sorted, dev, torch.int64)
+        slots = on_device(self.slot_of_sorted, dev, torch.int64)
+        values = on_device(self.residual, dev, dt)
+        # The 8 corners at once (8,P): one search, one gather. gather's
+        # backward adds into the slots atomically; indexing values[:, idx]
+        # would sort the indices in its backward (4x slower mapping).
+        k = _pack(base)[None] + on_device(self._corner_key_offsets, dev, torch.int64)
+        pos = torch.bucketize(k, keys).clamp_max(self.capacity - 1)
+        found = keys[pos] == k
+        # Trilinear weights of the 8 corners, in the order of _CORNERS (x
+        # outer, z inner): outer product of the (1 - f, f) pairs per axis.
+        wx, wy, wz = (torch.stack([1.0 - frac[a], frac[a]]) for a in range(3))
+        weight = (wx[:, None, None] * wy[None, :, None] * wz[None, None, :]).reshape(len(_CORNERS), -1)
+        weight = weight * found.to(dt)
+        idx = slots[pos].reshape(1, -1).expand(values.shape[0], -1)
+        r = (values.gather(1, idx).view(values.shape[0], len(_CORNERS), -1) * weight).sum(1)
+        return r.view(-1, h, w)
+
+    def __call__(self, albedo, direct, points_world):
+        return _shade_field(self, albedo, direct, self.field(points_world.detach()))
 
 
 declare_planned("ambient", "sh")

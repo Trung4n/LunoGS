@@ -151,14 +151,31 @@ class ColocatedShader:
         with torch.no_grad():
             for p in self._learnable.values():
                 p.tensor.data = p.tensor.data.clone()
+        # Same for the non-learned state sent with the values (vertex keys,
+        # D143): the frontend loading a received state must not overwrite
+        # the backend's newer allocation.
+        own = getattr(self.ambient, "own_storage", None)
+        if own is not None:
+            own()
+
+    def _aux_state(self):
+        """{path: value} of the components' non-learned state that goes with
+        the learned values (the vertex keys of position_grid_sparse, D143)."""
+        get = getattr(self.ambient, "aux_state", None)
+        return {f"ambient.{k}": v for k, v in get().items()} if get is not None else {}
 
     def learnable_state(self):
         """Current values, plain lists / floats (sent backend -> frontend)."""
-        return {path: p.tensor.detach().tolist() for path, p in self._learnable.items()}
+        state = {path: p.tensor.detach().tolist() for path, p in self._learnable.items()}
+        state.update(self._aux_state())
+        return state
 
     def learned_for_log(self):
         """(state for light_learned.csv, {path: array} of the parameters with a
-        summary, for light_learned_large.npz, D126)."""
+        summary, and the components' aux state, for light_learned_large.npz,
+        D126, D143)."""
+        import numpy as np
+
         state, large = {}, {}
         for path, p in self._learnable.items():
             if p.summary is None:
@@ -166,17 +183,51 @@ class ColocatedShader:
             else:
                 large[path] = p.tensor.detach().cpu().numpy()
                 state.update({f"{path}.{k}": v for k, v in p.summary().items()})
+        large.update({path: np.asarray(v, dtype=np.int64) for path, v in self._aux_state().items()})
         return state, large
 
     def load_learnable_state(self, state):
-        if set(state) != set(self._learnable):
+        aux = set(self._aux_state())
+        if set(state) != set(self._learnable) | aux:
             raise ValueError(
-                f"learned light state has {sorted(state)}, shader expects {sorted(self._learnable)}"
+                f"learned light state has {sorted(state)}, shader expects "
+                f"{sorted(set(self._learnable) | aux)}"
             )
+        if aux:
+            self.ambient.load_aux_state({path[len("ambient."):]: state[path] for path in aux})
         with torch.no_grad():
-            for path, value in state.items():
+            for path in self._learnable:
                 t = self._learnable[path].tensor
-                t.copy_(torch.tensor(value, dtype=t.dtype))
+                t.copy_(torch.tensor(state[path], dtype=t.dtype))
+
+    def allocates_field(self):
+        """True when the ambient field allocates its vertices from the
+        surface seen (position_grid_sparse, D143)."""
+        return hasattr(self.ambient, "allocate")
+
+    def observe_surface(self, gbuffer, viewpoint_camera):
+        """Allocates the ambient field's vertices around the shading points of
+        a rasterized G-buffer (backend, one keyframe): every pixel the map
+        covers (opacity > 0), the trusted ones at their depth and the others
+        at the fallback depth, i.e. every point where shading reads the field
+        with a nonzero albedo, hence a gradient. Uncovered pixels (albedo 0)
+        are left out. With only the trusted pixels, 22% of the vertices the
+        dense grid learns were missing (ambvar_hard, D143). Returns the number
+        of new vertices."""
+        points, _ = surface_points(gbuffer, viewpoint_camera, self.opacity_thr)
+        if points is None:
+            return 0
+        covered = gbuffer["opacity"][0] > 0
+        world = self._to_world(points, viewpoint_camera)
+        return self.ambient.allocate(world[:, covered])
+
+    @staticmethod
+    def _to_world(points, camera):
+        # x_C = R x_W + T (Camera.R, Camera.T: world to camera).
+        dev, dt = points.device, points.dtype
+        rot = camera.R.to(dev, dt)
+        trans = camera.T.to(dev, dt).view(3, 1, 1)
+        return (rot.T @ (points - trans).flatten(1)).view_as(points)
 
     def _light_axis(self, dev, dt):
         axis = on_device(self.axis, dev, dt)
@@ -272,10 +323,7 @@ class ColocatedShader:
         k = on_device(self.intensity, dev, dt)
         direct = k * (phi * fall * cos_term)
         if self._ambient_field:
-            # x_C = R x_W + T (Camera.R, Camera.T: world to camera).
-            rot = viewpoint_camera.R.to(dev, dt)
-            trans = viewpoint_camera.T.to(dev, dt).view(3, 1, 1)
-            world = (rot.T @ (points - trans).flatten(1)).view_as(points)
+            world = self._to_world(points, viewpoint_camera)
             radiance, amb = self.ambient(albedo, direct, world)
         elif self._ambient_maps:
             radiance, amb = self.ambient(albedo, direct, gbuffer)

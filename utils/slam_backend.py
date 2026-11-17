@@ -199,7 +199,22 @@ class BackEnd(mp.Process):
                 self.gaussians.get_xyz.device
             )
             self.log_albedo(frame_idx, "new", new)
+            self.allocate_ambient(frame_idx, viewpoint)
         log_exposure(self.config["Results"]["save_dir"], frame_idx, "new", viewpoint)
+
+    def allocate_ambient(self, frame_idx, viewpoint):
+        # position_grid_sparse (docs/DECISIONS.md D143): the ambient field gets
+        # vertices where this keyframe's shading reads it, from the RASTERIZED
+        # depth of the map just extended (not the sensor depth), before the
+        # mapping of this keyframe renders it. The frontend gets the keys with
+        # the next push_to_frontend.
+        allocates = getattr(self.shader, "allocates_field", None)
+        if allocates is None or not allocates():
+            return
+        with torch.no_grad():
+            pkg = render(viewpoint, self.gaussians, self.pipeline_params, self.background,
+                         shader=self.shader, defer_shading=True)
+            self.shader.observe_surface(pkg["gbuffer"], viewpoint)
 
     def set_albedo_lr(self, frame_idx):
         # Light.albedo_lr: relative_to_initial_albedo sets the albedo learning
