@@ -155,6 +155,15 @@ class LightLearner:
         with at_bound: project (D70); logged with the learned values."""
         return {path: p.n_at_bound for path, p in self.params.items() if p.n_at_bound is not None}
 
+    def state_tensors(self, path):
+        """The optimizer's per-element state of a parameter (Adam's moments)
+        and its prior target, i.e. every tensor laid out like the parameter:
+        a field whose layout changes moves them with its values (D144)."""
+        p = self.params[path]
+        state = self.optimizer.state.get(p.tensor, {})
+        tensors = [v for v in state.values() if torch.is_tensor(v) and v.shape == p.tensor.shape]
+        return tensors + [p.start]
+
     def zero_grad(self):
         self.optimizer.zero_grad(set_to_none=True)
 

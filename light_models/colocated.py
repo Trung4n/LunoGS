@@ -205,21 +205,23 @@ class ColocatedShader:
         surface seen (position_grid_sparse, D143)."""
         return hasattr(self.ambient, "allocate")
 
-    def observe_surface(self, gbuffer, viewpoint_camera):
+    def observe_surface(self, gbuffer, viewpoint_camera, companions=()):
         """Allocates the ambient field's vertices around the shading points of
         a rasterized G-buffer (backend, one keyframe): every pixel the map
         covers (opacity > 0), the trusted ones at their depth and the others
         at the fallback depth, i.e. every point where shading reads the field
         with a nonzero albedo, hence a gradient. Uncovered pixels (albedo 0)
         are left out. With only the trusted pixels, 22% of the vertices the
-        dense grid learns were missing (ambvar_hard, D143). Returns the number
-        of new vertices."""
+        dense grid learns were missing (ambvar_hard, D143). companions: the
+        optimizer state of the field's values, moved with them when the
+        layout changes (position_grid_growing, D144). Returns the number of
+        new vertices."""
         points, _ = surface_points(gbuffer, viewpoint_camera, self.opacity_thr)
         if points is None:
             return 0
         covered = gbuffer["opacity"][0] > 0
         world = self._to_world(points, viewpoint_camera)
-        return self.ambient.allocate(world[:, covered])
+        return self.ambient.allocate(world[:, covered], companions)
 
     @staticmethod
     def _to_world(points, camera):

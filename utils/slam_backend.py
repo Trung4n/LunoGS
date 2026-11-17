@@ -61,8 +61,9 @@ class BackEnd(mp.Process):
         self.live_mode = False
 
         self.pause = False
-        # device/dtype: not used anywhere in the backend.
-        self.device = "cuda"
+        # dtype: not used anywhere in the backend. (A `self.device = "cuda"`
+        # here, older than D128, overrode the None above, so a run without
+        # --backend_gpu failed in use_device: set_device("cuda"), D143.)
         self.dtype = torch.float32
         self.monocular = config["Training"]["monocular"]
         # iteration_count: total mapping iterations since the last reset.
@@ -211,10 +212,15 @@ class BackEnd(mp.Process):
         allocates = getattr(self.shader, "allocates_field", None)
         if allocates is None or not allocates():
             return
+        # position_grid_growing (D144) moves its values when the box grows:
+        # Adam's state of the values moves with them.
+        companions = []
+        if self.light_learner is not None and "ambient.residual" in self.light_learner.params:
+            companions = self.light_learner.state_tensors("ambient.residual")
         with torch.no_grad():
             pkg = render(viewpoint, self.gaussians, self.pipeline_params, self.background,
                          shader=self.shader, defer_shading=True)
-            self.shader.observe_surface(pkg["gbuffer"], viewpoint)
+            self.shader.observe_surface(pkg["gbuffer"], viewpoint, companions)
 
     def set_albedo_lr(self, frame_idx):
         # Light.albedo_lr: relative_to_initial_albedo sets the albedo learning

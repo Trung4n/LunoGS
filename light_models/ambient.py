@@ -317,6 +317,23 @@ def _pack(index):
     return (shifted[0] << (2 * _KEY_BITS)) | (shifted[1] << _KEY_BITS) | shifted[2]
 
 
+def _trilinear_weights(frac):
+    """(3,P) position inside the cell -> (8,P) weights of the corners, in the
+    order of _CORNERS (x outer, z inner): outer product of (1 - f, f) per axis."""
+    wx, wy, wz = (torch.stack([1.0 - frac[a], frac[a]]) for a in range(3))
+    return (wx[:, None, None] * wy[None, :, None] * wz[None, None, :]).reshape(len(_CORNERS), -1)
+
+
+def _gather_corners(values, index, weight):
+    """(C,N) values, (8,P) int64 index into N, (8,P) weights -> (C,P) sum of
+    the weighted corner values. gather's backward adds into the values
+    atomically; values[:, index] would sort the indices in its backward (4x
+    slower mapping, D143)."""
+    c = values.shape[0]
+    picked = values.gather(1, index.reshape(1, -1).expand(c, -1)).view(c, index.shape[0], -1)
+    return (picked * weight).sum(1)
+
+
 @register("ambient", "position_grid_sparse", numeric=("c",),
           options=("channels", "cell_m", "capacity", "residual_lr", "l1_weight"))
 class PositionGridSparse(MultiplicativeConst):
@@ -421,9 +438,11 @@ class PositionGridSparse(MultiplicativeConst):
 
     # ---- allocation (backend) ----
 
-    def allocate(self, points_world):
+    def allocate(self, points_world, companions=()):
         """Allocates the vertices of the cells holding the (3,P) world points
-        (surface points of a keyframe). Returns the number of new vertices."""
+        (surface points of a keyframe). Returns the number of new vertices.
+        companions: unused here (a vertex never moves), see
+        PositionGridGrowing.allocate."""
         if points_world.shape[1] == 0:
             return 0
         with torch.no_grad():
@@ -460,20 +479,180 @@ class PositionGridSparse(MultiplicativeConst):
         keys = on_device(self.keys_sorted, dev, torch.int64)
         slots = on_device(self.slot_of_sorted, dev, torch.int64)
         values = on_device(self.residual, dev, dt)
-        # The 8 corners at once (8,P): one search, one gather. gather's
-        # backward adds into the slots atomically; indexing values[:, idx]
-        # would sort the indices in its backward (4x slower mapping).
+        # The 8 corners at once (8,P): one search, one gather.
         k = _pack(base)[None] + on_device(self._corner_key_offsets, dev, torch.int64)
         pos = torch.bucketize(k, keys).clamp_max(self.capacity - 1)
         found = keys[pos] == k
-        # Trilinear weights of the 8 corners, in the order of _CORNERS (x
-        # outer, z inner): outer product of the (1 - f, f) pairs per axis.
-        wx, wy, wz = (torch.stack([1.0 - frac[a], frac[a]]) for a in range(3))
+        weight = _trilinear_weights(frac) * found.to(dt)
+        return _gather_corners(values, slots[pos], weight).view(-1, h, w)
+
+    def __call__(self, albedo, direct, points_world):
+        return _shade_field(self, albedo, direct, self.field(points_world.detach()))
+
+
+@register("ambient", "position_grid_growing", numeric=("c",),
+          options=("channels", "cell_m", "capacity", "margin_m", "residual_lr", "l1_weight"))
+class PositionGridGrowing(MultiplicativeConst):
+    """position_grid on a dense box that grows with the scene seen
+    (docs/DECISIONS.md D144): the same field E(x) = max(c + r(x), 0), r
+    trilinear on vertices every `cell_m` in the WORLD frame, but the box is
+    not fixed in advance. It starts around the first keyframe's shading
+    points and, when a keyframe's points fall outside, grows to hold them,
+    plus `margin_m` on each side so that it grows only a few times. It is an
+    axis-aligned box, not a cube: a corridor stays a corridor.
+
+    Unlike position_grid_sparse, a vertex's place in the buffer follows from
+    its coordinates (the box is dense), so a lookup is one address computation
+    and one read per corner, no search. Storage: a buffer of `capacity`
+    vertices (fixed size, so that the CUDA graphs and the compiled shading of
+    tracking keep reading the same buffers, D130-D134); the box is laid out
+    in it as flat = ((z - z0) * ny + (y - y0)) * nx + (x - x0), its origin and
+    vertex counts held in a tensor (`box`), not in shapes. Growing moves the
+    values (and the optimizer state passed as companions) to their new
+    places. A point outside the box reads 0, as an untouched vertex of
+    position_grid. A box larger than the buffer is an error.
+
+    Learning, penalty, detached lookup position, frontend sync (the box goes
+    with the values, aux_state): as position_grid_sparse."""
+
+    world_field = True
+    RESIDUAL = "residual"
+    BOX = "residual_box"
+
+    def __init__(self, c, channels, cell_m, capacity, margin_m, residual_lr, l1_weight):
+        super().__init__(c)
+        if channels not in (1, 3) or isinstance(channels, bool):
+            raise ValueError(f"Light.ambient.channels must be 1 or 3, got {channels!r}")
+        for name, v in (("cell_m", cell_m), ("residual_lr", residual_lr), ("l1_weight", l1_weight)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+                raise ValueError(f"Light.ambient.{name} must be a positive number, got {v!r}")
+        if isinstance(margin_m, bool) or not isinstance(margin_m, (int, float)) or margin_m < 0:
+            raise ValueError(f"Light.ambient.margin_m must be a number >= 0, got {margin_m!r}")
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 8:
+            raise ValueError(f"Light.ambient.capacity must be an integer >= 8 (one cell), got {capacity!r}")
+        self.cell_m = float(cell_m)
+        self.capacity = capacity
+        self.margin_cells = math.ceil(margin_m / self.cell_m)
+        self.residual_lr = float(residual_lr)
+        self.l1_weight = float(l1_weight)
+        self.residual = torch.zeros(channels, capacity, dtype=torch.float32, requires_grad=True)
+        # (x0, y0, z0, nx, ny, nz): vertex index of the box's lowest corner and
+        # vertex counts; empty (0 vertices) until the first allocation.
+        self.box = torch.zeros(6, dtype=torch.int64)
+        self.growths = 0
+        self._corner_offsets = torch.tensor(_CORNERS, dtype=torch.int64).T.reshape(3, -1, 1)
+
+    @property
+    def n_vertices(self):
+        return int(self.box[3:].prod())
+
+    # ---- learning and sync ----
+
+    def learnable_extra(self, prefix):
+        from light_models.learning import LearnableParam
+
+        path = f"{prefix}.{self.RESIDUAL}"
+        return {path: LearnableParam(path, self.residual, self.residual.detach().clone(),
+                                     self.residual_lr, 0.0, summary=self.residual_summary)}
+
+    def residual_summary(self):
+        r = self.residual.detach()[:, :self.n_vertices]
+        moved = r != 0
+        return {"abs_mean_moved": float(r[moved].abs().mean()) if moved.any() else 0.0,
+                "min": float(r.min()) if r.numel() else 0.0, "max": float(r.max()) if r.numel() else 0.0,
+                "vertices_moved": float(moved.any(0).sum()),
+                "vertices_in_box": float(self.n_vertices),
+                "capacity_used": self.n_vertices / self.capacity,
+                "growths": float(self.growths)}
+
+    def aux_state(self):
+        """Non-learned state the frontend and the logs need besides the
+        values: the box the values are laid out in."""
+        return {self.BOX: self.box.tolist()}
+
+    def load_aux_state(self, state):
+        box = [int(v) for v in state[self.BOX]]
+        if len(box) != 6 or min(box[3:]) < 0 or math.prod(box[3:]) > self.capacity:
+            raise ValueError(f"Light.ambient: received box {box!r} does not fit capacity {self.capacity}")
+        with torch.no_grad():
+            self.box.copy_(torch.tensor(box, dtype=torch.int64))  # in place (D130)
+
+    def own_storage(self):
+        """Private storage for the box (see ColocatedShader.own_learnable_storage)."""
+        self.box = self.box.clone()
+
+    # ---- growth (backend) ----
+
+    def allocate(self, points_world, companions=()):
+        """Grows the box to hold the cells of the (3,P) world points (shading
+        points of a keyframe) with the margin. companions: tensors laid out
+        as `residual` (the optimizer state) that move with it. Returns the
+        number of vertices added to the box."""
+        if points_world.shape[1] == 0:
+            return 0
+        with torch.no_grad():
+            base, _ = _cell_index(points_world.detach().to(torch.float32), self.cell_m)
+            need_lo = base.min(1).values.cpu()
+            need_hi = base.max(1).values.cpu() + 1  # last vertex of the cell
+            old = self.box.clone()
+            n_old = self.n_vertices
+            if n_old:
+                old_hi = old[:3] + old[3:] - 1
+                if bool((need_lo >= old[:3]).all() and (need_hi <= old_hi).all()):
+                    return 0  # inside: no growth
+                # Outside on some axis: grow there, with the margin beyond the
+                # points (only on the axes and sides that need it).
+                lo = torch.where(need_lo < old[:3], need_lo - self.margin_cells, old[:3])
+                hi = torch.where(need_hi > old_hi, need_hi + self.margin_cells, old_hi)
+            else:
+                lo, hi = need_lo - self.margin_cells, need_hi + self.margin_cells
+            dims = hi - lo + 1
+            n_new = int(dims.prod())
+            if n_new > self.capacity:
+                raise RuntimeError(
+                    f"Light.ambient.capacity {self.capacity} exceeded: the box would be "
+                    f"{dims.tolist()} vertices ({[round(float(d - 1) * self.cell_m, 2) for d in dims]} m); "
+                    "raise the capacity or the cell size")
+            if n_old:
+                # New place of every old vertex, in the old flat order.
+                ox, oy, oz = (torch.arange(int(old[3 + a])) + int(old[a] - lo[a]) for a in range(3))
+                z, y, x = torch.meshgrid(oz, oy, ox, indexing="ij")
+                dest = ((z * int(dims[1]) + y) * int(dims[0]) + x).reshape(-1)
+                for t in (self.residual, *companions):
+                    moved = t[..., :n_old].clone()
+                    t.zero_()
+                    t[..., dest] = moved
+                self.growths += 1
+            self.box.copy_(torch.cat([lo, dims]))
+        return n_new - n_old
+
+    # ---- shading ----
+
+    def field(self, points_world):
+        """(channels,H,W) r at the (3,H,W) world points; 0 outside the box."""
+        dev, dt = points_world.device, points_world.dtype
+        _, h, w = points_world.shape
+        base, frac = _cell_index(points_world.reshape(3, -1), self.cell_m)
+        box = on_device(self.box, dev, torch.int64)
+        values = on_device(self.residual, dev, dt)
+        rel = base - box[:3].view(3, 1)  # (3,P): lower corner, relative to the box
+        dims = box[3:].view(3, 1)
+        # Per axis: is the lower / upper vertex inside the box. Folded into the
+        # (1 - f, f) weights, so the 8 corner weights (outer product) are 0
+        # outside the box; their (clamped) addresses are then never used.
+        w_axes = []
+        for a in range(3):
+            lo_in = ((rel[a] >= 0) & (rel[a] < dims[a])).to(dt)
+            hi_in = ((rel[a] >= -1) & (rel[a] < dims[a] - 1)).to(dt)
+            w_axes.append(torch.stack([(1.0 - frac[a]) * lo_in, frac[a] * hi_in]))
+        wx, wy, wz = w_axes
         weight = (wx[:, None, None] * wy[None, :, None] * wz[None, None, :]).reshape(len(_CORNERS), -1)
-        weight = weight * found.to(dt)
-        idx = slots[pos].reshape(1, -1).expand(values.shape[0], -1)
-        r = (values.gather(1, idx).view(values.shape[0], len(_CORNERS), -1) * weight).sum(1)
-        return r.view(-1, h, w)
+        # Address of the lower corner, then of the 8 corners: + dz*nx*ny + dy*nx + dx.
+        flat0 = (rel[2] * box[4] + rel[1]) * box[3] + rel[0]
+        side = on_device(self._corner_offsets, dev, torch.int64)[:, :, 0]  # (3,8)
+        corner = (side[2] * box[4] + side[1]) * box[3] + side[0]
+        flat = (flat0[None] + corner[:, None]).clamp(0, self.capacity - 1)
+        return _gather_corners(values, flat, weight).view(-1, h, w)
 
     def __call__(self, albedo, direct, points_world):
         return _shade_field(self, albedo, direct, self.field(points_world.detach()))
