@@ -1,0 +1,18 @@
+# Main model run (rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml, D139)
+# without the n . l term (as rgbd_nocos.yaml, D49-D51): no surface normals at
+# all, so nothing depends on finite differences of the sensor depth. For the
+# depth-noise experiment (D72, D75; datasets office0/lit_depthnoise_light|heavy),
+# where 1-pixel normals of noisy depth are off by 35-64 deg (median). The
+# pixel weight (n . l >= min_cos_nl) needs normals, so it goes too, as in
+# rgbd_nocos.yaml. The albedo absorbs the mean n . l (D51, D73).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml"
+
+Light:
+  cosine:
+    _replace: true
+    type: none
+
+LightTracking:
+  pixel_weight:
+    _replace: true
+    enabled: false

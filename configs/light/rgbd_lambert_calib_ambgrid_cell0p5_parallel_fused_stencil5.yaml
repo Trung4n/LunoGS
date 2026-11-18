@@ -1,0 +1,14 @@
+# Main model run (rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml, D139)
+# with the sensor normals taken over 5-pixel finite differences instead of 1,
+# for NOISY sensor depth (depth-noise experiment, D72, D75; datasets
+# office0/lit_depthnoise_light|heavy). 1 px was chosen on noise-free depth
+# (D46, D48-D50); on noisy depth it amplifies the noise into the normals.
+# Normal error against clean-depth normals (office0, frames 0..1600, scratch):
+#   light level: 1 px median 35 deg (59 % of pixels > 30 deg), 5 px 9 deg (4 %);
+#   heavy level: 1 px 64 deg (90 %), 5 px 28 deg (45 %).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml"
+
+Light:
+  cosine:
+    normal_source:
+      stencil_px: 5

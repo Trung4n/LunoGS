@@ -251,6 +251,8 @@ def test_light_config_set():
         "rgbd_lambert_selfcal_bootstrap_region_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_cell1p0_parallel_fused_wait40.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml",
+        "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_stencil5.yaml",
+        "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_nocos.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p64_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p8_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_sparse.yaml",
