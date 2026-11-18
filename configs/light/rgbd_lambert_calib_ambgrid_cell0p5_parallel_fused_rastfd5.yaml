@@ -1,0 +1,15 @@
+# Main model run (rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml, D139)
+# with normals from the RASTERIZED depth of the map (depth_fd_edge), 5-pixel
+# one-sided differences, instead of the sensor depth: a normal source from the
+# map, usable for monocular too (docs/DECISIONS.md D146, step "2a"). 1-pixel
+# differences of the rasterized depth failed (D48: a staircase, one depth per
+# Gaussian); 5 pixels average over a few Gaussians. The map is fused over many
+# keyframes, so the sensor noise is averaged in it.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused.yaml"
+
+Light:
+  cosine:
+    normal_source:
+      _replace: true
+      type: depth_fd_edge
+      stencil_px: 5

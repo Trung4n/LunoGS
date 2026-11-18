@@ -199,7 +199,7 @@ class SensorDepthFiniteDifference:
             # Tracking: once per frame, in the frame's static buffers (D130).
             from utils.perf import frame_constant
 
-            n, ok = frame_constant(camera, ("sensor_normals", self.fd_class.__name__),
+            n, ok = frame_constant(camera, ("sensor_normals", type(self).__name__, self.fd_class.__name__),
                                    lambda: self._from_sensor(depth, camera, points, gbuffer))
             return n, (ok & valid) if self.trusted_pixels_only else ok
         # The key holds the camera and depth objects themselves (not their
@@ -219,11 +219,15 @@ class SensorDepthFiniteDifference:
 
     def _from_sensor(self, depth, camera, points, gbuffer):
         z = depth if torch.is_tensor(depth) else torch.from_numpy(depth)
-        z = z.to(points.device, points.dtype).reshape(points.shape[1:])
+        z = self._prefilter(z.to(points.device, points.dtype).reshape(points.shape[1:]))
         h, w = z.shape
         rays = pixel_rays(camera, h, w, points.device, points.dtype, 0.0)
         # 0 = no sensor reading (the dataset's convention), not a threshold.
         return tuple(self.fd(rays * z[None], z > 0, gbuffer, camera))
+
+    def _prefilter(self, z):
+        """The sensor depth the differences are taken on (none here)."""
+        return z
 
 
 @register("normals", "sensor_depth_fd_edge", options=("stencil_px", "trusted_pixels_only"))
@@ -232,6 +236,77 @@ class SensorDepthEdgeAwareFiniteDifference(SensorDepthFiniteDifference):
     depth_fd_edge (docs/DECISIONS.md D94). RGB-D only."""
 
     fd_class = EdgeAwareDepthFiniteDifference
+
+
+def bilateral_depth(z, radius_px, sigma_space_px, sigma_range_rel):
+    """Edge-preserving smoothing of a depth image (H,W; 0 = no reading),
+    for normals of NOISY sensor depth (docs/DECISIONS.md D146). Weighted mean
+    of the readings in the (2r+1)^2 window, weight = exp(-d^2 / 2 sigma_s^2)
+    (pixel distance d) * exp(-(ln z' - ln z)^2 / 2 sigma_r^2): the range term
+    is on log depth, so sigma_range_rel is a RELATIVE depth difference (the
+    sensor noise grows with depth). Pixels without a reading neither
+    contribute nor receive a value. Where the window is one-sided (within r
+    of the image border, next to holes and depth edges) the mean of a slanted
+    surface is biased towards its inner side, a few degrees on the normals of
+    a steep plane; inside, a plane is unchanged. One pass of (2r+1)^2 shifted
+    adds: run once per frame (frame_constant / the normal cache)."""
+    valid = z > 0
+    logz = torch.where(valid, torch.log(torch.where(valid, z, torch.ones_like(z))), torch.zeros_like(z))
+    h, w = z.shape
+    r = radius_px
+    pad_log = torch.nn.functional.pad(logz[None, None], (r, r, r, r))[0, 0]
+    pad_val = torch.nn.functional.pad(valid[None, None].to(z.dtype), (r, r, r, r))[0, 0]
+    num = torch.zeros_like(z)
+    den = torch.zeros_like(z)
+    inv_s = 1.0 / (2.0 * sigma_space_px ** 2)
+    inv_r = 1.0 / (2.0 * sigma_range_rel ** 2)
+    dx2 = torch.arange(-r, r + 1, device=z.device, dtype=z.dtype) ** 2
+    for dy in range(-r, r + 1):
+        # One row of the window at once: (H, W, 2r+1) views of the padded
+        # band (unfold copies nothing), so 2r+1 passes instead of (2r+1)^2.
+        nb_log = pad_log[r + dy:r + dy + h].unfold(1, 2 * r + 1, 1)
+        nb_val = pad_val[r + dy:r + dy + h].unfold(1, 2 * r + 1, 1)
+        wgt = nb_val * torch.exp(-(dx2 + dy * dy) * inv_s - (nb_log - logz[..., None]) ** 2 * inv_r)
+        num += (wgt * nb_log).sum(-1)
+        den += wgt.sum(-1)
+    # The centre itself always weighs 1 where valid, so den > 0 there.
+    out = torch.exp(num / torch.where(valid, den, torch.ones_like(den)))
+    return torch.where(valid, out, torch.zeros_like(z))
+
+
+@register("normals", "sensor_depth_bilateral_fd_edge",
+          options=("stencil_px", "trusted_pixels_only", "bilateral"))
+class SensorDepthBilateralEdgeAwareFiniteDifference(SensorDepthEdgeAwareFiniteDifference):
+    """sensor_depth_fd_edge on the sensor depth smoothed by bilateral_depth
+    (docs/DECISIONS.md D146). RGB-D only. On noisy depth, 1-pixel differences
+    turn the noise into normals off by 35 deg (Kinect-v1 level) to 64 deg
+    (heavy level) (D145); smoothing first keeps the depth edges, so the
+    edge-aware differences still see them. bilateral: {radius_px,
+    sigma_space_px, sigma_range_rel}, all required."""
+
+    def __init__(self, stencil_px, trusted_pixels_only, bilateral):
+        super().__init__(stencil_px, trusted_pixels_only)
+        where = "Light.cosine.normal_source.bilateral"
+        if not isinstance(bilateral, dict):
+            raise TypeError(f"{where} must be a block, got {bilateral!r}")
+        keys = ("radius_px", "sigma_space_px", "sigma_range_rel")
+        extra = set(bilateral) - set(keys)
+        if extra:
+            raise ValueError(f"{where}: unexpected keys {sorted(extra)}")
+        missing = [k for k in keys if k not in bilateral]
+        if missing:
+            raise KeyError(f"{where}: missing keys {missing}")
+        r = bilateral["radius_px"]
+        if isinstance(r, bool) or not isinstance(r, int) or r < 1:
+            raise ValueError(f"{where}.radius_px must be an integer >= 1, got {r!r}")
+        for k in ("sigma_space_px", "sigma_range_rel"):
+            v = bilateral[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+                raise ValueError(f"{where}.{k} must be a positive number, got {v!r}")
+        self.bilateral = (r, float(bilateral["sigma_space_px"]), float(bilateral["sigma_range_rel"]))
+
+    def _prefilter(self, z):
+        return bilateral_depth(z, *self.bilateral)
 
 
 # shortest_axis: normal = shortest axis of each Gaussian, rasterized.
