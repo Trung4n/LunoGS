@@ -1,0 +1,13 @@
+# rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_bilateral.yaml (normals
+# from the bilateral-smoothed sensor depth, D146) with the pixels the sensor
+# did not measure shaded with the frame's mean n . l instead of 0
+# (Light.cosine.missing_normal: frame_mean, docs/DECISIONS.md D147). With
+# factor 0 they render ambient-only (near black): on the noisy datasets that
+# alone capped the PSNR at 28.5 dB (light, 3 % of the pixels without a
+# reading) and 17.7 dB (heavy, 19 %), as measured (29.6 and 19.3 dB, D146).
+# The loss still excludes these pixels; only the rendering changes.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_bilateral.yaml"
+
+Light:
+  cosine:
+    missing_normal: frame_mean

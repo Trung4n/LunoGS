@@ -64,6 +64,8 @@ def load_heavy():
 VIEW_MODES = ("follow", "overview", "orbit", "free")
 COLOR_MODES = ("color", "keyframe", "opacity", "height")
 IMAGE_KINDS = ("obs", "render", "albedo", "depth")
+# /api/points?snap=refined: the map after the color refinement (uint32 in the header)
+REFINED_SNAP = 0xFFFFFFFF
 # Largest map image the server renders (pixels), whatever the browser asks.
 MAX_RENDER = (1920, 1080)
 
@@ -148,6 +150,17 @@ class AppRun:
             self._gaussian_counts = out
         return self._gaussian_counts
 
+    def map_info(self):
+        """Index of final.npz in run.maps and the Gaussian count of the
+        refined map (None when not recorded)."""
+        r = self.run
+        final = next((k for k, (_, p) in enumerate(r.maps) if p == r.final_map), None)
+        refined = None
+        if r.refined_map is not None:
+            with np.load(r.refined_map) as z:
+                refined = int(z["xyz"].shape[0])
+        return {"final_snap": final, "refined_gaussians": refined}
+
     def light_series(self):
         rows = self.run.light or []
         out = []
@@ -179,6 +192,7 @@ class AppRun:
             "error": [[f, round(self.err_cm[f], 3)] for f in self.all_frames],
             "ate": self.ate,
             "gaussians": self.gaussian_counts(),
+            **self.map_info(),
             "light": self.light_series(),
             "light_status": r.light_status,
             "light_fixed": r.light_fixed,
@@ -198,16 +212,22 @@ class AppRun:
     # ---- data for the in-browser (WebGL) views ----
 
     def snapshot(self, k):
-        """Map snapshot number k of run.maps (in frame order), cached."""
-        path = self.run.maps[k][1]
+        """Map snapshot number k of run.maps (in frame order), or the refined
+        map for k = REFINED_SNAP; cached."""
+        if k == REFINED_SNAP:
+            if self.run.refined_map is None:
+                raise FileNotFoundError("no maps/final_refined.npz in this recording")
+            path = self.run.refined_map
+        else:
+            path = self.run.maps[k][1]
         if self._snap[0] != path:
             with np.load(path) as z:
                 self._snap = (path, {key: z[key] for key in z.files})
         return self._snap[1]
 
     def points_payload(self, k, mode):
-        """Binary point cloud of snapshot k for the WebGL views (Gaussians with
-        opacity > 0.05):
+        """Binary point cloud of snapshot k (or REFINED_SNAP) for the WebGL
+        views (Gaussians with opacity > 0.05):
           4 x uint32 header (n, k, frame of the snapshot, 0),
           n x 3 float32 position, n float32 footprint radius (sigma),
           n x 3 uint8 colour of the colour mode, n uint8 opacity."""
@@ -223,7 +243,8 @@ class AppRun:
             rad = np.ascontiguousarray(np.sqrt(sc[:, 1] * sc[:, 2]))
             rgb = np.ascontiguousarray((self.colors(snap, mode)[keep] * 255 + 0.5).astype(np.uint8))
             alpha = np.ascontiguousarray((op[keep] * 255 + 0.5).astype(np.uint8))
-            head = struct.pack("<4I", len(xyz), k, self.run.maps[k][0], 0)
+            frame = self.run.maps[-1][0] if k == REFINED_SNAP else self.run.maps[k][0]
+            head = struct.pack("<4I", len(xyz), k, frame, 0)
             if len(self._payloads) >= 8:
                 self._payloads.pop(next(iter(self._payloads)))
             self._payloads[key] = head + xyz.tobytes() + rad.tobytes() + rgb.tobytes() + alpha.tobytes()
@@ -307,7 +328,7 @@ class AppRun:
         K = rr.intrinsics(w, h, q["fov"])
         c2w = self.camera(frame, q)
         margin = q["ceiling"]
-        snap = self._cut(self.run.map_at(frame), None if margin is None else self.top + margin)
+        snap = self._cut(self.run.map_of(q["map"], frame), None if margin is None else self.top + margin)
         if snap is None or len(snap["xyz"]) == 0:
             img = np.zeros((h, w, 3), np.uint8)
         else:
@@ -519,11 +540,14 @@ def parse_render_query(q):
     color = get("color", "color")
     if color not in COLOR_MODES:
         raise ValueError(f"color must be one of {COLOR_MODES}")
+    source = get("map", "live")
+    if source not in rr.MAP_SOURCES:
+        raise ValueError(f"map must be one of {rr.MAP_SOURCES}")
     w = int(min(max(int(get("w", 960)), 64), MAX_RENDER[0]))
     h = int(min(max(int(get("h", 540)), 36), MAX_RENDER[1]))
     ceiling = get("ceiling", "")
     out = {
-        "mode": mode, "color": color, "w": w, "h": h,
+        "mode": mode, "color": color, "map": source, "w": w, "h": h,
         "fov": float(get("fov", 70)),
         "layers": set(filter(None, get("layers", "est,gt,frustum,kf").split(","))),
         "ceiling": None if ceiling in ("", "none") else float(ceiling),
@@ -599,8 +623,10 @@ class Handler(BaseHTTPRequestHandler):
                 color = q.get("color", ["color"])[0]
                 if color not in COLOR_MODES:
                     return self._error(400, f"color must be one of {COLOR_MODES}")
+                snap = q["snap"][0]
+                snap = REFINED_SNAP if snap == "refined" else int(snap)
                 with st.lock:  # shares the colour cache with the renderer
-                    body = run.points_payload(int(q["snap"][0]), color)
+                    body = run.points_payload(snap, color)
                 return self._send(200, body, "application/octet-stream")
             if url.path == "/api/metrics":
                 run = st.runs[int(q["run"][0])]
@@ -645,7 +671,7 @@ class Handler(BaseHTTPRequestHandler):
         except CLIENT_GONE:
             self.close_connection = True
             return None
-        except (KeyError, ValueError, IndexError) as exc:
+        except (KeyError, ValueError, IndexError, FileNotFoundError) as exc:
             return self._error(400, repr(exc))
         except Exception as exc:  # noqa: BLE001 - reported to the UI
             traceback.print_exc()

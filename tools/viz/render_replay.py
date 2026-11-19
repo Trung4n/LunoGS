@@ -45,6 +45,8 @@ COL_GT = (60, 200, 60)
 COL_KF = (230, 140, 40)
 COL_TEXT = (235, 235, 235)
 COL_PANEL_BG = (30, 30, 30)
+# Which map the views draw (Run.map_of).
+MAP_SOURCES = ("live", "final", "refined")
 
 
 # ---------------------------------------------------------------- loading
@@ -92,6 +94,12 @@ class Run:
             with np.load(final_map) as z:
                 self.maps.append((int(z["frame_idx"]), final_map))
         self.maps.sort(key=lambda m: m[0])
+        self.final_map = final_map if os.path.isfile(final_map) else None
+        # The map after slam.py's offline color refinement (D81), taken at the
+        # same frame as final.npz: not on the timeline, shown on request
+        # (map_of). None when the run skipped the refinement.
+        refined = os.path.join(self.dir, "maps", "final_refined.npz")
+        self.refined_map = refined if os.path.isfile(refined) else None
         # Per-run files sit in the run folder (the parent of record/), or next
         # to meta.json when only record/ was downloaded.
         run_dir = os.path.dirname(os.path.normpath(self.dir))
@@ -118,8 +126,18 @@ class Run:
         for idx, p in self.maps:
             if idx <= frame_idx:
                 path = p
-        if path is None:
-            return None
+        return None if path is None else self._load_map(path)
+
+    def map_of(self, source, frame_idx):
+        """The map shown at frame_idx: 'live' the snapshot of that time
+        (map_at), 'final' the online map at the end of the run, 'refined' the
+        map after the color refinement. None if that map was not recorded."""
+        if source == "live":
+            return self.map_at(frame_idx)
+        path = {"final": self.final_map, "refined": self.refined_map}[source]
+        return None if path is None else self._load_map(path)
+
+    def _load_map(self, path):
         if self._map_cache[0] != path:
             with np.load(path) as z:
                 self._map_cache = (path, {k: z[k] for k in z.files})
@@ -128,6 +146,7 @@ class Run:
     def _color_gain(self):
         # Linear albedo is unbounded (K = 1 runs reach ~2-5): scale the map
         # colours once per run so that the 99th percentile maps to white.
+        # The refined map uses the same gain, so before / after compare.
         if self.meta["map_color"] != "linear_albedo" or not self.maps:
             return 1.0
         with np.load(self.maps[-1][1]) as z:

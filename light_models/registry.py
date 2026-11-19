@@ -8,7 +8,11 @@
 #   options - non-numeric settings (e.g. lambert's normal_source);
 #   nested  - {key: kind}: keys whose block is ANOTHER component of that kind,
 #             built here (with the params file) and passed as an object
-#             (e.g. the initial profile of the spline, D67).
+#             (e.g. the initial profile of the spline, D67);
+#   optional - non-numeric settings that may be absent, passed only when
+#             present; the class documents what absence means, always the
+#             behaviour before the key existed (as Light.profile_bootstrap,
+#             D112), so resolved configs of earlier runs still build (D147).
 # Any other key in the block is an error (typos must not pass silently).
 #
 # No torch import here: config parsing stays testable without torch.
@@ -17,9 +21,10 @@ KINDS = ("falloff", "angular", "cosine", "normals", "ambient")
 
 _REGISTRY = {kind: {} for kind in KINDS}
 _PLANNED = {kind: set() for kind in KINDS}
+_OPTIONAL = {}  # (kind, name) -> optional option keys
 
 
-def register(kind, name, numeric=(), options=(), nested=None):
+def register(kind, name, numeric=(), options=(), nested=None, optional=()):
     if kind not in _REGISTRY:
         raise ValueError(f"unknown component kind {kind!r}")
     nested = dict(nested or {})
@@ -31,6 +36,7 @@ def register(kind, name, numeric=(), options=(), nested=None):
         if name in _REGISTRY[kind]:
             raise ValueError(f"{kind} '{name}' registered twice")
         _REGISTRY[kind][name] = (cls, tuple(numeric), tuple(options), nested)
+        _OPTIONAL[(kind, name)] = tuple(optional)
         return cls
 
     return deco
@@ -65,7 +71,8 @@ def build_component(kind, block, where, params_data):
         raise TypeError(f"{where} must be a block with a 'type', got {block!r}")
     name = require_key(block, "type", where)
     cls, numeric, options, nested = lookup(kind, name, where)
-    allowed = set(numeric) | set(options) | set(nested)
+    optional = _OPTIONAL.get((kind, name), ())
+    allowed = set(numeric) | set(options) | set(nested) | set(optional)
     extra = set(block) - {"type"} - allowed
     if extra:
         raise ValueError(
@@ -78,6 +85,7 @@ def build_component(kind, block, where, params_data):
     }
     specs = dict(kwargs)
     kwargs.update({o: require_key(block, o, where) for o in options})
+    kwargs.update({o: block[o] for o in optional if o in block})
     kwargs.update({
         key: build_component(sub_kind, require_key(block, key, where), f"{where}.{key}", params_data)
         for key, sub_kind in nested.items()

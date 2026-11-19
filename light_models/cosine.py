@@ -20,11 +20,25 @@ class NoCosine:
         pass
 
 
-@register("cosine", "lambert", options=("normal_source", "warmup_keyframes"))
+MISSING_NORMAL = ("zero", "frame_mean")
+
+
+@register("cosine", "lambert", options=("normal_source", "warmup_keyframes"), optional=("missing_normal",))
 class Lambert:
     """max(0, n . l), l = unit vector from the point to the light. Pixels
-    without a valid normal get factor 0 and are reported in aux so the loss
-    can exclude them (they would otherwise be shaded ambient-only).
+    without a valid normal are reported in aux (normal_valid false, cos_nl 0)
+    so the loss can exclude them, and their factor is set by missing_normal
+    (docs/DECISIONS.md D147):
+      zero (also when the key is absent, the behaviour before D147): factor
+        0, i.e. they render ambient-only, near black. With normals from the
+        sensor depth, every pixel the sensor did not measure (depth edges,
+        holes, beyond its range) has no normal: on noisy depth that alone
+        capped the rendered PSNR at 28.5 dB (3 % of the pixels) and 17.7 dB
+        (19 %), whatever the normal accuracy (D146);
+      frame_mean: factor = the mean of max(0, n . l) over the pixels of the
+        same image that have a normal and a trusted G-buffer depth, i.e. "the
+        orientation is unknown: shade it with the frame's typical one". Only
+        the rendering changes; the loss still excludes these pixels.
 
     warmup_keyframes (docs/DECISIONS.md D43): while the map holds at most
     that many keyframes, the factor is 1 (no n . l) and no n . l map is
@@ -36,7 +50,14 @@ class Lambert:
     before each tracking / mapping step, each on its own copy of the shader.
     """
 
-    def __init__(self, normal_source, warmup_keyframes):
+    def __init__(self, normal_source, warmup_keyframes, missing_normal="zero"):
+        # "zero" for an absent key is the behaviour before the key existed
+        # (registry optional keys, D147), not a tuned value.
+        if missing_normal not in MISSING_NORMAL:
+            raise ValueError(
+                f"Light.cosine.missing_normal must be one of {list(MISSING_NORMAL)}, got {missing_normal!r}"
+            )
+        self.missing_normal = missing_normal
         if (isinstance(warmup_keyframes, bool) or not isinstance(warmup_keyframes, int)
                 or warmup_keyframes < 0):
             raise ValueError(
@@ -75,7 +96,14 @@ class Lambert:
         n, n_valid = self.normals(points, valid, gbuffer, camera)
         cos_nl = (n * to_light).sum(0)
         cos_nl = torch.where(n_valid, cos_nl, torch.zeros_like(cos_nl))
-        return cos_nl.clamp_min(0.0), {"cos_nl": cos_nl, "normal_valid": n_valid}
+        factor = cos_nl.clamp_min(0.0)
+        if self.missing_normal == "frame_mean":
+            # On the GPU, no host read (CUDA graphs, D130). A frame without
+            # any normal has mean 0, the "zero" behaviour.
+            known = (n_valid & valid).to(factor.dtype)
+            mean = (factor * known).sum() / known.sum().clamp_min(1.0)
+            factor = torch.where(n_valid, factor, mean)
+        return factor, {"cos_nl": cos_nl, "normal_valid": n_valid}
 
 
 declare_planned("cosine")  # no planned forms beyond none / lambert
