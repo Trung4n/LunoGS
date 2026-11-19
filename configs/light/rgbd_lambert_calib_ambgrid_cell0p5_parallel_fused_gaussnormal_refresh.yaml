@@ -1,0 +1,18 @@
+# rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml with the
+# map normals of tracking re-rendered at the current pose estimate every 10
+# iterations (docs/DECISIONS.md D149).
+#
+# Tracking starts from the previous frame's pose (motion_model: none); the
+# inter-frame motion of office0 is 2.4 px median, 4.8 px p90 at the image, so
+# normals rendered once at that pose sit a few pixels off the observation.
+# Kaggle, once per frame: RPE above `_bilateral_fill` at every depth-noise
+# level (light 0.0038 vs 0.0023, ICL-NUIM 0.0031 vs 0.0022, heavy 0.0051-0.0062
+# vs 0.0031) and heavy ATE 2.3-2.4 cm (two runs) against 1.6, although the map
+# normals are better (8.3 deg vs 15.3 for one frame's bilateral normals).
+# Still no gradient through the normals (they would pull tracking, D48).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml"
+
+Light:
+  cosine:
+    normal_source:
+      tracking_refresh_every: 10

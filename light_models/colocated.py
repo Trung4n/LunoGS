@@ -313,6 +313,13 @@ class ColocatedShader:
         shapes (the backend then requires flat Gaussians)."""
         return self._gaussian_normals() is not None
 
+    def tracking_refresh_every(self):
+        """Tracking iterations between re-renders of the frame rasters at the
+        current pose (shortest_axis.tracking_refresh_every), or None: rendered
+        once per frame, at the initial pose."""
+        normals = self._gaussian_normals()
+        return None if normals is None else normals.tracking_refresh_every
+
     def frame_rasters(self, gaussians, camera):
         """{gbuffer key: function -> (N,3) colours} that render() rasterizes
         at every render, except while the map is frozen for the camera (the

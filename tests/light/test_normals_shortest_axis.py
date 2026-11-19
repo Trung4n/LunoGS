@@ -18,7 +18,7 @@ INIT = {"type": "depth_fd", "stencil_px": 1}
 
 def _source(**over):
     block = {"type": "shortest_axis", "min_agreement": 0.5, "init_flatness": 0.1, "init": INIT,
-             "supervision": None}
+             "supervision": None, "tracking_refresh_every": None}
     block.update(over)
     return build_component("normals", block, "Light.cosine.normal_source", None)
 
@@ -249,7 +249,8 @@ def test_supervision_reaches_the_lambert_aux_and_has_gradient():
     lam = build_component("cosine", {
         "type": "lambert", "warmup_keyframes": 0,
         "normal_source": {"type": "shortest_axis", "min_agreement": 0.5, "init_flatness": 0.1,
-                          "init": INIT, "supervision": {"weight": 1.0, "source": {"type": "gbuffer"}}},
+                          "init": INIT, "supervision": {"weight": 1.0, "source": {"type": "gbuffer"}},
+                          "tracking_refresh_every": None},
     }, "Light.cosine", {})
     raw = torch.zeros(3, H, W)
     raw[1] = -0.3
@@ -276,3 +277,38 @@ def test_supervision_reaches_the_lambert_aux_and_has_gradient():
 def test_bad_supervision(sup, err):
     with pytest.raises(err):
         _source(supervision=sup)
+
+
+# ---- re-rendering the map normals during tracking (tracking_refresh_every) ----
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.5, "10"])
+def test_bad_tracking_refresh_every(value):
+    with pytest.raises(ValueError):
+        _source(tracking_refresh_every=value)
+
+
+def test_tracking_refresh_every_reaches_the_shader_hook():
+    from light_models.colocated import ColocatedShader
+
+    assert _source().tracking_refresh_every is None
+    assert _source(tracking_refresh_every=10).tracking_refresh_every == 10
+    shader = ColocatedShader.__new__(ColocatedShader)  # only the hook under test
+    shader.cosine = SimpleNamespace(normals=_source(tracking_refresh_every=10))
+    assert shader.tracking_refresh_every() == 10
+    shader.cosine = SimpleNamespace(normals=None)
+    assert shader.tracking_refresh_every() is None
+
+
+def test_drop_frame_rasters_rebuilds_into_the_same_pooled_buffer():
+    from utils.perf import FRAME_RASTER, drop_frame_rasters, frame_constant
+
+    cam = SimpleNamespace(frame_cache={}, frame_pool={})
+    key = (FRAME_RASTER, "gaussian_normal")
+    first = frame_constant(cam, key, lambda: torch.zeros(3, H, W))
+    obs = frame_constant(cam, ("observation",), lambda: torch.full((2,), 7.0))
+    drop_frame_rasters(cam)
+    assert key not in cam.frame_cache and ("observation",) in cam.frame_cache
+    again = frame_constant(cam, key, lambda: torch.ones(3, H, W))
+    # Same memory (what a recorded CUDA graph reads), new values.
+    assert again is first and bool((first == 1).all())
+    assert frame_constant(cam, ("observation",), lambda: torch.zeros(2)) is obs

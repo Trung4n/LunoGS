@@ -11,7 +11,7 @@ from utils.camera_utils import Camera, build_projection_matrix
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import FakeQueue, clone_obj, move_obj, raise_if_dead
-from utils.perf import FramePrefetcher, TimeBudget
+from utils.perf import FramePrefetcher, TimeBudget, drop_frame_rasters
 from utils.config_utils import require_key
 
 # Training.motion_model values (D128).
@@ -323,6 +323,8 @@ class FrontEnd(mp.Process):
             else:
                 viewpoint.frame_cache = {}
             gui = self.gui_enabled()
+            # Map normals re-rendered at the current pose (D149).
+            refresh = self.shader.tracking_refresh_every() if self.shader is not None else None
             for tracking_itr in range(self.tracking_itr_num):
                 render_pkg = render(
                     viewpoint,
@@ -368,6 +370,11 @@ class FrontEnd(mp.Process):
                     )
                 if converged:
                     break
+                if refresh is not None and (tracking_itr + 1) % refresh == 0:
+                    drop_frame_rasters(viewpoint)
+                    with torch.no_grad():
+                        render(viewpoint, self.gaussians, self.pipeline_params, self.background,
+                               shader=self.shader, defer_shading=True)
             self.last_tracking_iters = tracking_itr + 1  # timing log (D79)
 
         # Typical scene depth at this frame. Keyframe distance thresholds are

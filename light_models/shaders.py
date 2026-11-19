@@ -68,6 +68,9 @@ class IdentityShader:
     def frame_rasters(self, gaussians, camera):
         return {}
 
+    def tracking_refresh_every(self):
+        return None
+
     def initial_orientation(self, camera, depth):
         return None
 

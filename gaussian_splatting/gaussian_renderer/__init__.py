@@ -21,7 +21,7 @@ from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.graphics_utils import RASTERIZER_PIXEL_OFFSET
 from gaussian_splatting.utils.sh_utils import eval_sh
 from utils.color_space import linear2sRGB
-from utils.perf import frame_constant, map_frozen
+from utils.perf import FRAME_RASTER, frame_constant, map_frozen
 
 # This is the single "forward pass" of the whole SLAM system: both
 # FrontEnd.tracking() (pose-only optimization) and BackEnd.map()/
@@ -342,7 +342,7 @@ def render(
                     with torch.no_grad():
                         return raster()
 
-                frame_constant(viewpoint_camera, ("frame_raster", key), build)
+                frame_constant(viewpoint_camera, (FRAME_RASTER, key), build)
             else:
                 if key in gbuffer:
                     raise ValueError(f"frame raster {key!r} clashes with the G-buffer")

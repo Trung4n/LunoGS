@@ -48,6 +48,20 @@ def map_frozen(camera):
     return getattr(camera, "frame_cache", None) is not None and getattr(camera, "map_frozen", False)
 
 
+FRAME_RASTER = "frame_raster"
+
+
+def drop_frame_rasters(camera):
+    """Forgets the frame rasters (maps rendered from the map's shape at the
+    frame's pose, gaussian_renderer.render) of the frame being tracked: the
+    next render() rasterizes them again at the camera's current pose. With a
+    frame pool (CUDA graphs) the new values are copied into the same buffers,
+    so recorded graphs read them (shortest_axis.tracking_refresh_every, D149)."""
+    cache = camera.frame_cache
+    for key in [k for k in cache if isinstance(k, tuple) and k[:1] == (FRAME_RASTER,)]:
+        del cache[key]
+
+
 def _pooled(pool, key, value):
     if not torch.is_tensor(value):
         return value

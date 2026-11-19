@@ -333,7 +333,7 @@ def quaternion_from_z(n):
     return q / q.norm(dim=1, keepdim=True)
 
 
-@register("normals", "shortest_axis", options=("min_agreement", "init_flatness", "init", "supervision"))
+@register("normals", "shortest_axis", options=("min_agreement", "init_flatness", "init", "supervision", "tracking_refresh_every"))
 class ShortestAxis:
     """Normals from the map itself: each Gaussian's shortest axis, flipped to
     face the camera, rasterized like a colour (docs/DECISIONS.md D149). The
@@ -361,6 +361,14 @@ class ShortestAxis:
     normals (D48, D146 rastfd5), and once per frame keeps the CUDA graphs and
     the compiled shading unchanged. The colour refinement (geometry frozen)
     does the same per keyframe.
+    tracking_refresh_every (required; null = never): re-render the normals,
+    still without gradient, at the current pose estimate after every this
+    many tracking iterations. Why: tracking starts from the previous frame's
+    pose (Training.motion_model: none), and the inter-frame motion of office0
+    is 2.4 px median, 4.8 px p90 at the image; normals rendered there are
+    shifted against the observation, which the sensor-depth sources never
+    are (they come from the observed frame). Kaggle, once per frame: RPE
+    higher than `_bilateral_fill` at every depth-noise level (D149).
     supervision (required; null = none): {weight, source}. In mapping, the
     penalty weight * mean (1 - n . n_s) over the pixels where both have a
     normal, n the map's normal (with gradient) and n_s that of `source`, a
@@ -376,8 +384,12 @@ class ShortestAxis:
 
     KEY = "gaussian_normal"
 
-    def __init__(self, min_agreement, init_flatness, init, supervision):
+    def __init__(self, min_agreement, init_flatness, init, supervision, tracking_refresh_every):
         where = "Light.cosine.normal_source"
+        r = tracking_refresh_every
+        if r is not None and (isinstance(r, bool) or not isinstance(r, int) or r < 1):
+            raise ValueError(f"{where}.tracking_refresh_every must be null or an integer >= 1, got {r!r}")
+        self.tracking_refresh_every = r
         for name, v in (("min_agreement", min_agreement), ("init_flatness", init_flatness)):
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 1:
                 raise ValueError(f"{where}.{name} must be in (0, 1], got {v!r}")
@@ -434,13 +446,13 @@ class ShortestAxis:
     def __call__(self, points, valid, gbuffer, camera):
         if gbuffer.get("placement", False):
             return self.init(points, valid, gbuffer, camera)
-        from utils.perf import frame_constant, map_frozen
+        from utils.perf import FRAME_RASTER, frame_constant, map_frozen
 
         if map_frozen(camera):
             def missing():
                 raise KeyError("shortest_axis: the frame's normal raster was not rendered")
 
-            raw = frame_constant(camera, ("frame_raster", self.KEY), missing)
+            raw = frame_constant(camera, (FRAME_RASTER, self.KEY), missing)
         elif self.KEY in gbuffer:
             raw = gbuffer[self.KEY]
         else:

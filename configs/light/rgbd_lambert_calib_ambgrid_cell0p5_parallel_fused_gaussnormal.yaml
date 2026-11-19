@@ -33,6 +33,9 @@ Light:
       type: shortest_axis
       min_agreement: 0.5
       init_flatness: 0.1
+      # Rendered once per frame at the initial pose (the previous frame's);
+      # `_gaussnormal_refresh` re-renders them during tracking (D149).
+      tracking_refresh_every: null
       init:
         type: sensor_depth_bilateral_fd_edge
         stencil_px: 4

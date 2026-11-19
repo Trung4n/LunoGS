@@ -38,6 +38,7 @@ from gaussian_splatting.gaussian_renderer import RASTERIZER_PIXEL_OFFSET, apply_
 from light_models import read_light_tracking
 from utils.config_utils import require_key
 from utils.logging_utils import Log
+from utils.perf import drop_frame_rasters
 from utils.pose_utils import CONVERGED_THRESHOLD, SE3_exp
 from utils.slam_utils import get_loss_tracking
 
@@ -207,6 +208,10 @@ class GraphedTrackingLoop:
         self.config = config
         self.shader = shader
         self.opts = opts
+        # Map normals re-rendered at the current pose (D149), between replays:
+        # at the first convergence check at least that many iterations after
+        # the last render (the eager loop: exactly every that many).
+        self.refresh = shader.tracking_refresh_every()
         lr = config["Training"]["lr"]
         dev = torch.device("cuda", torch.cuda.current_device())
         f32 = dict(device=dev, dtype=torch.float32)
@@ -239,6 +244,7 @@ class GraphedTrackingLoop:
         self.captures = 0
         self.compiles = 0
         self.reruns = 0
+        self.refreshes = 0
         self.iterations = 0
 
     # ---- per frame ----
@@ -309,6 +315,17 @@ class GraphedTrackingLoop:
             self.rot.zero_()
             self.trans.zero_()
 
+    def _refresh(self, cam, pipe, background):
+        """Renders the frame rasters again at the current pose, into the
+        static buffers the graph reads (utils/perf.drop_frame_rasters)."""
+        cam._matrix_cache = None  # R, T moved inside the graph: no version bump
+        drop_frame_rasters(cam)
+        with torch.no_grad():
+            render(cam, self.map, pipe, background, shader=self.shader, defer_shading=True,
+                   raster_capacity=0, raster_count=self.count)
+        cam._matrix_cache = None
+        self.refreshes += 1
+
     def _compile_shading(self, cam, pipe, background):
         """CompiledShadeLoss traced on the current G-buffer (after the frame's
         eager iteration filled the frame's constants)."""
@@ -349,6 +366,9 @@ class GraphedTrackingLoop:
             grown = self.map.load(gaussians, o["map_capacity_margin"])
             while True:
                 self._reset(R0, T0)
+                if self.refresh is not None:
+                    # Again at the initial pose (a rerun after an overflow).
+                    drop_frame_rasters(viewpoint)
                 self._iteration(viewpoint, pipe, background, 0)  # eager, exact count
                 done, count = self.done.item(), int(self.count.item())
                 key = (self.shader.graph_state(), self.map.size, viewpoint.image_height, viewpoint.image_width)
@@ -363,13 +383,18 @@ class GraphedTrackingLoop:
                             self.shade_key = shade_key
                         self._capture(viewpoint, pipe, background)
                         self.key, grown = key, False
+                    since = 1  # iterations since the frame rasters were rendered
                     while remaining > 0:
                         k = min(o["check_every"], remaining)
                         for _ in range(k):
                             self.graph.replay()
                         remaining -= k
+                        since += k
                         if self.done.item():
                             break
+                        if self.refresh is not None and since >= self.refresh and remaining > 0:
+                            self._refresh(viewpoint, pipe, background)
+                            since = 0
                 count_max = int(self.count_max.item())
                 if count_max <= max(self.capacity, count):
                     break
