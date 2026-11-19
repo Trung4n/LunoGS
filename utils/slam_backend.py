@@ -13,6 +13,7 @@ from light_models.albedo_init import get_albedo_init
 from light_models.diagnostics import log_albedo_stats, log_exposure, log_learned_light, log_timing
 from light_models.learning import LightLearner
 from utils.config_utils import require_key
+from utils.scale_regularizer import read_scale_regularizer
 from utils.graphed_refinement import read_refinement_graph
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj, drain_queue
@@ -122,6 +123,14 @@ class BackEnd(mp.Process):
         # (docs/DECISIONS.md D132).
         self.keyframe_mapping_itr_num = require_key(
             self.config["Training"], "keyframe_mapping_itr_num", "Training")
+        # Shape regularizer of the Gaussians in mapping (D149); MonoGS wrote
+        # the isotropic term with weight 10 here.
+        self.scale_regularizer = read_scale_regularizer(self.config)
+        form = self.scale_regularizer.name
+        if self.shader is not None and self.shader.uses_gaussian_normals() and form != "disc":
+            raise ValueError(
+                "normal_source shortest_axis reads the Gaussians' shortest axis: "
+                f"Training.scale_regularizer must be 'disc', got {form!r}")
         # densify/prune when iteration_count % every == offset
         self.gaussian_update_every = self.config["Training"]["gaussian_update_every"]
         self.gaussian_update_offset = self.config["Training"]["gaussian_update_offset"]
@@ -187,6 +196,12 @@ class BackEnd(mp.Process):
                 shader=self.shader,
                 render_keyframe=render_keyframe,
             )
+        # Flat Gaussians oriented by the init normals when the shading reads
+        # normals from the map's shape (shortest_axis, D149); None = spheres.
+        orientation = None
+        if self.shader is not None:
+            orientation = self.shader.initial_orientation(
+                viewpoint, torch.from_numpy(depth_map.astype("float32")).to(albedo_map.device))
         self.gaussians.extend_from_pcd_seq(
             viewpoint,
             kf_id=frame_idx,
@@ -194,6 +209,7 @@ class BackEnd(mp.Process):
             scale=scale,
             depthmap=depth_map,
             albedo_map=albedo_map,
+            orientation=orientation,
         )
         if self.shader is not None:
             new = (self.gaussians.unique_kfIDs == frame_idx).to(
@@ -492,13 +508,14 @@ class BackEnd(mp.Process):
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
 
-            # 3) Isotropic regularizer: penalizes each Gaussian's scales for
-            # deviating from their mean, pushing Gaussians toward spheres.
-            # Avoids long thin "needle" Gaussians that fit the training views
-            # but render badly from new viewpoints (which tracking relies on).
-            scaling = self.gaussians.get_scaling
-            isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-            loss_mapping += 10 * isotropic_loss.mean()
+            # 3) Shape regularizer (Training.scale_regularizer, D149). MonoGS's
+            # isotropic term penalizes each Gaussian's scales for deviating
+            # from their mean, pushing Gaussians toward spheres: it avoids long
+            # thin "needle" Gaussians that fit the training views but render
+            # badly from new viewpoints (which tracking relies on). The disc
+            # form keeps that on the two largest scales and flattens the third
+            # (normals from the map's shape).
+            loss_mapping += self.scale_regularizer(self.gaussians.get_scaling)
             if self.light_learner is not None:
                 prior = self.light_learner.prior_loss(len(self.viewpoints))
                 if prior is not None:

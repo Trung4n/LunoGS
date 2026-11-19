@@ -33,6 +33,13 @@
       <button data-mode="free" title="Kéo: xoay · Cuộn: zoom · Chuột phải / Shift+kéo: dời [4]">Tự do</button>
     </nav>
     <div class="spacer"></div>
+    <label class="field" title="Bản đồ vẽ trong các khung 3D: ảnh chụp theo thời gian, hoặc bản đồ cuối / sau color refinement ở mọi frame">Bản đồ
+      <select id="mapsrc">
+        <option value="live">Theo thời gian</option>
+        <option value="final">Cuối (online)</option>
+        <option value="refined">Sau refine</option>
+      </select>
+    </label>
     <label class="field">Màu
       <select id="color">
         <option value="color">Thật / albedo</option>

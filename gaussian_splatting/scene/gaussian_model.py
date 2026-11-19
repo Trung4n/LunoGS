@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import math
 import os
 
 import numpy as np
@@ -237,7 +238,7 @@ class GaussianModel:
             self.active_sh_degree += 1
 
     def create_pcd_from_image(
-        self, cam_info, init=False, scale=2.0, depthmap=None, *, albedo_map
+        self, cam_info, init=False, scale=2.0, depthmap=None, *, albedo_map, orientation=None
     ):
         # Builds the parameters of the new Gaussians for one keyframe (it does
         # NOT add them to the map, see extend_from_pcd_seq).
@@ -287,10 +288,10 @@ class GaussianModel:
             depth = o3d.geometry.Image(depth_raw.astype(np.float32))
 
         return self.create_pcd_from_image_and_depth(
-            cam, rgb, depth, init, albedo_map=albedo_map
+            cam, rgb, depth, init, albedo_map=albedo_map, orientation=orientation
         )
 
-    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, *, albedo_map):
+    def create_pcd_from_image_and_depth(self, cam, rgb, depth, init=False, *, albedo_map, orientation=None):
         # Back-projects an RGB-D pair into a world-space point cloud and turns
         # each point into an initial Gaussian. Returns
         # (xyz, features, scales, rots, opacities), all pre-activation.
@@ -349,6 +350,8 @@ class GaussianModel:
             _, h, w = albedo_map.shape
             values = albedo_map.detach().cpu().double().numpy().reshape(3, h * w)
             new_rgb = values[:, idx].T  # (N, 3)
+        elif orientation is not None:
+            raise ValueError("orientation needs the pixel index of every point (albedo_map, light model)")
 
         pcd = BasicPointCloud(
             points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
@@ -385,6 +388,24 @@ class GaussianModel:
         # Identity rotation (w=1) and opacity 0.5.
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
+        if orientation is not None:
+            # Flat Gaussians for normals from the map's shape (shortest_axis,
+            # docs/DECISIONS.md D149): local z along the normal of the point's
+            # own pixel (camera frame -> world), scale along it `flatness`
+            # times the in-plane one. Points whose pixel has no normal keep
+            # the sphere above.
+            if self.isotropic:
+                raise ValueError("oriented Gaussians need 3 scales (GaussianModel.isotropic is set)")
+            from light_models.normals import quaternion_from_z
+
+            normals, n_valid, flatness = orientation
+            _, h, w = normals.shape
+            n_pix = normals.detach().reshape(3, h * w)[:, idx].T.float().cuda()
+            ok = n_valid.detach().reshape(h * w)[idx].cuda()
+            R_wc = cam.R.detach().float().cuda().T  # camera -> world
+            n_world = n_pix @ R_wc.T
+            rots = torch.where(ok[:, None], quaternion_from_z(n_world), rots)
+            scales[:, 2] = torch.where(ok, scales[:, 2] + math.log(flatness), scales[:, 2])
         opacities = inverse_sigmoid(
             0.5
             * torch.ones(
@@ -431,14 +452,17 @@ class GaussianModel:
         )
 
     def extend_from_pcd_seq(
-        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, *, albedo_map
+        self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None, *, albedo_map, orientation=None
     ):
         # Entry point used by the backend (BackEnd.add_next_kf): create the
         # Gaussians for one keyframe, then add them to the map. albedo_map:
         # see create_pcd_from_image (None = original MonoGS colors).
+        # orientation: None (spheres, MonoGS) or (normals (3,H,W) camera
+        # frame, valid (H,W), flatness) for flat Gaussians (D149).
         fused_point_cloud, features, scales, rots, opacities = (
             self.create_pcd_from_image(
-                cam_info, init, scale=scale, depthmap=depthmap, albedo_map=albedo_map
+                cam_info, init, scale=scale, depthmap=depthmap, albedo_map=albedo_map,
+                orientation=orientation,
             )
         )
         self.extend_from_pcd(

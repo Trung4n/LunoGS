@@ -68,6 +68,10 @@ def shading_at_depth(shader, depth, viewpoint):
         # The placement depth is indexed like the observed image (Open3D /
         # OpenCV pixel centers), not like a rasterized map (D29).
         "pixel_offset": 0.0,
+        # Shading NEW Gaussians: normals rendered from the map's shape
+        # (shortest_axis) are those the new Gaussians are given, the init
+        # normals on this depth (D149).
+        "placement": True,
     }
     # Per-Gaussian light maps (D121): the de-shaded albedo is that of NEW
     # Gaussians, whose per-Gaussian values start at 0 (the global level c

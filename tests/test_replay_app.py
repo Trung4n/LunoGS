@@ -248,6 +248,31 @@ def test_open_a_run_zip(tmp_path):
     assert not (tmp_path / "escape.txt").exists()
 
 
+def test_final_and_refined_maps_on_request(tmp_path):
+    run_dir = rec._record(tmp_path / "r")
+    maps = run_dir / "record" / "maps"
+    with np.load(maps / "final.npz") as z:  # the refined map: 150 of the 200 final Gaussians
+        np.savez_compressed(maps / "final_refined.npz", **{k: (z[k][:150] if z[k].ndim else z[k]) for k in z.files})
+    plain = rec._record(tmp_path / "p")  # skipped the refinement
+    state = ra.AppState("points", cache_dir=None, runs_dir=str(tmp_path / "runs"))
+    run, other = (state.runs[state.load(str(d))] for d in (run_dir, plain))
+    s = run.summary()
+    assert s["final_snap"] == len(s["gaussians"]) - 1 and s["refined_gaussians"] == 150
+    assert [g[1] for g in s["gaussians"]] == [100, 118, 200]  # the timeline is unchanged
+    assert other.summary()["refined_gaussians"] is None
+    q = lambda src: ra.parse_render_query({"mode": ["overview"], "map": [src], "w": ["160"], "h": ["90"]})  # noqa: E731
+    # at frame 5 the timeline shows the initial snapshot; final / refined show the end of the run
+    assert [run.render(5, q(src))[1] for src in rr.MAP_SOURCES] == [100, 200, 150]
+    assert other.render(5, q("refined"))[1] == 0  # not recorded: an empty view, not another map
+    with pytest.raises(ValueError):
+        q("before")
+    body = run.points_payload(ra.REFINED_SNAP, "color")
+    n, k, frame, _ = np.frombuffer(body[:16], "<u4")
+    assert (n, k, frame) == (150, ra.REFINED_SNAP, 20)
+    with pytest.raises(FileNotFoundError):
+        other.points_payload(ra.REFINED_SNAP, "color")
+
+
 def test_image_metrics_start_on_load_and_are_cached(tmp_path):
     run_dir = rec._record(tmp_path / "r")
     state = ra.AppState("points", cache_dir=str(tmp_path / "cache"))

@@ -1,0 +1,47 @@
+# rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_bilateral_fill.yaml with
+# the normals rendered from the MAP instead of the sensor depth of the frame
+# (normal source shortest_axis, docs/DECISIONS.md D149): flat Gaussians, the
+# normal of a pixel is the blended shortest axis of the Gaussians covering it.
+# The map averages the depth noise of every keyframe that saw a surface,
+# where one frame's bilateral filter stops at ~16 deg on the heavy level
+# (correlated 16 px noise, D146); no sensor depth needed once a Gaussian
+# exists (the base for monocular).
+#
+# New Gaussians start flat, oriented by the bilateral sensor normals of their
+# keyframe (init), and the same normals de-shade their albedo. Mapping
+# optimizes the orientation through the shading plus a supervision penalty
+# towards each keyframe's bilateral normals (without it the photometric and
+# depth losses turn the discs away from the surface); tracking reads the
+# normals rendered once per frame at its initial pose.
+#
+# Local test, office0, first 30 frames, median angle to the clean-depth
+# normals (D149): heavy noise 10.2 deg (one frame's bilateral normals 15.9,
+# rotations frozen 14.0, no supervision 22-25); clean 2.0 (bilateral 1.6).
+# Supervision weight 0.1 gives the same on heavy (10.4) but 3.1 on clean;
+# 10 broke tracking (ATE 3.5 cm on 30 frames). in_plane_weight is MonoGS's
+# isotropic 10 on the two largest scales; flatness_weight 0.1 makes a sphere
+# cost 0.1 and a disc at the initial flatness 0.01 (not tuned).
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_bilateral_fill.yaml"
+
+Training:
+  scale_regularizer: {_replace: true, type: disc, in_plane_weight: 10, flatness_weight: 0.1}
+
+Light:
+  cosine:
+    normal_source:
+      _replace: true
+      type: shortest_axis
+      min_agreement: 0.5
+      init_flatness: 0.1
+      init:
+        type: sensor_depth_bilateral_fd_edge
+        stencil_px: 4
+        trusted_pixels_only: false
+        bilateral: {radius_px: 7, sigma_space_px: 3.5, sigma_range_rel: 0.06}
+      supervision:
+        weight: 1.0
+        source:
+          type: sensor_depth_bilateral_fd_edge
+          stencil_px: 4
+          trusted_pixels_only: false
+          bilateral: {radius_px: 7, sigma_space_px: 3.5, sigma_range_rel: 0.06}

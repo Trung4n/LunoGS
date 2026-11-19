@@ -38,6 +38,16 @@ def frame_constant(camera, key, build):
     return cache[key]
 
 
+def map_frozen(camera):
+    """True while the map cannot change between the renders of this camera's
+    frame: the frame being tracked (FrontEnd.tracking) and the keyframes of
+    the graphed colour refinement. Maps rendered from the map's shape
+    (frame rasters, shortest_axis normals, D149) are then frame constants.
+    Mapping keyframes also hold a frame cache (D131) but their map is being
+    optimized, so the flag stays off there."""
+    return getattr(camera, "frame_cache", None) is not None and getattr(camera, "map_frozen", False)
+
+
 def _pooled(pool, key, value):
     if not torch.is_tensor(value):
         return value

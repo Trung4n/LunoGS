@@ -260,6 +260,9 @@ class FrontEnd(mp.Process):
         #
         # Initial guess: Training.motion_model (D128).
         viewpoint.update_RT(*self.initial_pose(cur_frame_idx))
+        # The map is a frozen snapshot during tracking: maps rendered from its
+        # shape (shortest_axis normals) are frame constants (utils/perf.map_frozen, D149).
+        viewpoint.map_frozen = True
         if self.shader is not None:
             # Light-model warm-up state (D43): keyframes in the map so far.
             self.shader.set_keyframe_count(len(self.kf_indices))
@@ -395,6 +398,7 @@ class FrontEnd(mp.Process):
             graphed.end_frame(viewpoint)
         else:
             viewpoint.frame_cache = None
+        viewpoint.map_frozen = False
         return render_pkg
 
     def graphed_iteration(self):

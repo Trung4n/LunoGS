@@ -8,7 +8,7 @@
 import torch
 
 from light_models.gbuffer import pixel_rays
-from light_models.registry import declare_planned, register
+from light_models.registry import register
 
 
 @register("normals", "depth_fd", options=("stencil_px",))
@@ -309,5 +309,176 @@ class SensorDepthBilateralEdgeAwareFiniteDifference(SensorDepthEdgeAwareFiniteDi
         return bilateral_depth(z, *self.bilateral)
 
 
-# shortest_axis: normal = shortest axis of each Gaussian, rasterized.
-declare_planned("normals", "shortest_axis")
+def quaternion_axes(q):
+    """(N,3,3) rotation matrices of (N,4) quaternions (w, x, y, z), on q's
+    device; column j is the Gaussian's j-th local axis in the world frame (the
+    covariance is R S S^T R^T, gaussian_model.build_covariance_from_scaling_rotation).
+    The same matrix as general_utils.build_rotation, which only builds on CUDA."""
+    q = q / q.norm(dim=1, keepdim=True)
+    w, x, y, z = q.unbind(1)
+    return torch.stack([
+        torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], 1),
+        torch.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], 1),
+        torch.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], 1),
+    ], 1)
+
+
+def quaternion_from_z(n):
+    """(N,4) unit quaternions (w, x, y, z) of the shortest rotation taking the
+    local z axis to the unit vectors n (N,3). n and -n give the same flat
+    Gaussian, so n is flipped to n_z >= 0 first: then 1 + n_z >= 1 and the
+    rotation is never the degenerate half turn."""
+    n = torch.where(n[:, 2:3] < 0, -n, n)
+    q = torch.stack([1 + n[:, 2], -n[:, 1], n[:, 0], torch.zeros_like(n[:, 0])], 1)
+    return q / q.norm(dim=1, keepdim=True)
+
+
+@register("normals", "shortest_axis", options=("min_agreement", "init_flatness", "init", "supervision"))
+class ShortestAxis:
+    """Normals from the map itself: each Gaussian's shortest axis, flipped to
+    face the camera, rasterized like a colour (docs/DECISIONS.md D149). The
+    blended vector of a pixel is normalized; the pixel has a normal where the
+    G-buffer trusts it (opacity >= Light.gbuffer.opacity_thr) and the blended
+    vector keeps at least min_agreement of the opacity, |sum w_i n_i| >=
+    min_agreement * sum w_i (the Gaussians covering it roughly agree).
+
+    Meaningful only for FLAT Gaussians: Training.scale_regularizer must be
+    `disc` (the backend refuses `isotropic`, whose spheres have no shortest
+    axis). New Gaussians start flat, oriented by the normals of the `init`
+    block (another normal source, e.g. sensor_depth_bilateral_fd_edge for
+    RGB-D) on the placement depth, with their normal axis init_flatness times
+    their in-plane size (GaussianModel.create_pcd_from_image_and_depth). The
+    placement de-shading (albedo_init.shading_at_depth, gbuffer["placement"])
+    uses the same init normals, so it stays the inverse of how the new
+    Gaussians are shaded.
+
+    Unlike the sensor-depth sources, the normal of a pixel is not a constant
+    of the observation: it is rendered from the map. Mapping rasterizes it at
+    every render, with gradient to the Gaussians' rotation, scale, position
+    and opacity. Tracking rasterizes it once per frame, at the frame's
+    initial pose, and keeps it fixed (utils/perf.frame_constant): normals
+    that move with the pose pulled tracking off with the rasterized-depth
+    normals (D48, D146 rastfd5), and once per frame keeps the CUDA graphs and
+    the compiled shading unchanged. The colour refinement (geometry frozen)
+    does the same per keyframe.
+    supervision (required; null = none): {weight, source}. In mapping, the
+    penalty weight * mean (1 - n . n_s) over the pixels where both have a
+    normal, n the map's normal (with gradient) and n_s that of `source`, a
+    normal source of the keyframe's observation (e.g. the bilateral sensor
+    normals). Added to the mapping loss with the ambient's L1
+    (light_map_penalty), never in tracking or the refinement. Why: the
+    photometric and depth losses alone turn the rotations away from the
+    surface (local test, heavy depth noise, 60 frames: 15 deg after the
+    init with the rotations frozen, 22-25 deg when they learn); every
+    keyframe that sees a Gaussian pulls it towards its own noisy normal, so
+    the map averages the noise of independent frames. RGB-D only; monocular
+    will need another source (null meanwhile)."""
+
+    KEY = "gaussian_normal"
+
+    def __init__(self, min_agreement, init_flatness, init, supervision):
+        where = "Light.cosine.normal_source"
+        for name, v in (("min_agreement", min_agreement), ("init_flatness", init_flatness)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 1:
+                raise ValueError(f"{where}.{name} must be in (0, 1], got {v!r}")
+        self.min_agreement = float(min_agreement)
+        self.init_flatness = float(init_flatness)
+        if not isinstance(init, dict):
+            raise TypeError(f"{where}.init must be a block {{type: <normal source>, ...}}, got {init!r}")
+        from light_models.registry import build_component
+
+        if init.get("type") == "shortest_axis":
+            raise ValueError(f"{where}.init cannot be shortest_axis itself")
+        self.init = build_component("normals", init, f"{where}.init", None)
+        self.requires_sensor_depth = self.init.requires_sensor_depth
+        self.supervision = None
+        if supervision is not None:
+            sw = f"{where}.supervision"
+            if not isinstance(supervision, dict) or set(supervision) != {"weight", "source"}:
+                raise ValueError(f"{sw} must be null or a block {{weight, source}}, got {supervision!r}")
+            w = supervision["weight"]
+            if isinstance(w, bool) or not isinstance(w, (int, float)) or not w > 0:
+                raise ValueError(f"{sw}.weight must be > 0 (null for no supervision), got {w!r}")
+            src = supervision["source"]
+            if not isinstance(src, dict):
+                raise TypeError(f"{sw}.source must be a normal source block, got {src!r}")
+            if src.get("type") == "shortest_axis":
+                raise ValueError(f"{sw}.source cannot be shortest_axis itself")
+            self.supervision = (float(w), build_component("normals", src, f"{sw}.source", None))
+            self.requires_sensor_depth = self.requires_sensor_depth or self.supervision[1].requires_sensor_depth
+
+    # ---- what render() rasterizes ----
+
+    def frame_rasters(self, gaussians, camera):
+        """{gbuffer key: zero-argument function -> (N,3) colours}: the
+        shortest axis of every Gaussian, facing the camera, in the camera
+        frame. A function so that tracking, which reads the frame's copy,
+        computes nothing on its other iterations."""
+        def colours():
+            xyz = gaussians.get_xyz
+            R = camera.R.to(xyz.device, xyz.dtype)  # world -> camera
+            T = camera.T.to(xyz.device, xyz.dtype)
+            axes = quaternion_axes(gaussians.get_rotation)
+            k = gaussians.get_scaling.argmin(dim=1)
+            n_w = axes.gather(2, k.view(-1, 1, 1).expand(-1, 3, 1))[:, :, 0]
+            n_c = n_w @ R.T
+            x_c = xyz @ R.T + T
+            # Facing the camera: n . x_C < 0 (x_C = the ray to the centre).
+            flip = (n_c * x_c).sum(1, keepdim=True) > 0
+            return torch.where(flip, -n_c, n_c)
+
+        return {self.KEY: colours}
+
+    # ---- normal source ----
+
+    def __call__(self, points, valid, gbuffer, camera):
+        if gbuffer.get("placement", False):
+            return self.init(points, valid, gbuffer, camera)
+        from utils.perf import frame_constant, map_frozen
+
+        if map_frozen(camera):
+            def missing():
+                raise KeyError("shortest_axis: the frame's normal raster was not rendered")
+
+            raw = frame_constant(camera, ("frame_raster", self.KEY), missing)
+        elif self.KEY in gbuffer:
+            raw = gbuffer[self.KEY]
+        else:
+            raise KeyError(
+                f"normal_source 'shortest_axis' needs gbuffer[{self.KEY!r}] (rendered by "
+                "gaussian_renderer.render) or gbuffer['placement']"
+            )
+        length = raw.norm(dim=0)
+        opacity = gbuffer["opacity"][0]
+        ok = valid & (length >= self.min_agreement * opacity) & (length > 0)
+        # Division only where length > 0 (no epsilon).
+        n = raw / torch.where(ok, length, torch.ones_like(length))[None]
+        facing_away = (n * points).sum(0) > 0
+        n = torch.where(facing_away[None], -n, n)
+        n = torch.where(ok[None], n, torch.zeros_like(n))
+        return n, ok
+
+    def penalty(self, n, ok, points, valid, gbuffer, camera):
+        """Mapping penalty pulling the map's normals towards the supervision
+        source's (see the class doc); None when there is none to add (no
+        supervision, frozen map, placement shading)."""
+        from utils.perf import map_frozen
+
+        if self.supervision is None or map_frozen(camera) or gbuffer.get("placement", False):
+            return None
+        weight, source = self.supervision
+        n_s, ok_s = source(points, valid, gbuffer, camera)
+        both = (ok & ok_s).to(n.dtype)
+        mis = 1.0 - (n * n_s).sum(0)
+        return weight * (mis * both).sum() / both.sum().clamp_min(1.0)
+
+    def initial_orientation(self, camera, depth):
+        """(normals (3,H,W) in the camera frame, valid (H,W)) for the new
+        Gaussians of a keyframe, from the init source on the placement depth
+        (H,W tensor, 0 = no Gaussian), in the data's pixel convention."""
+        h, w = depth.shape
+        rays = pixel_rays(camera, h, w, depth.device, depth.dtype, 0.0)
+        valid = depth > 0
+        gbuffer = {"depth": depth[None], "opacity": valid.to(depth.dtype)[None],
+                   "pixel_offset": 0.0, "placement": True}
+        return self.init(rays * depth[None], valid, gbuffer, camera)

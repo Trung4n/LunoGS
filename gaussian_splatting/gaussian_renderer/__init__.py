@@ -21,6 +21,7 @@ from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.graphics_utils import RASTERIZER_PIXEL_OFFSET
 from gaussian_splatting.utils.sh_utils import eval_sh
 from utils.color_space import linear2sRGB
+from utils.perf import frame_constant, map_frozen
 
 # This is the single "forward pass" of the whole SLAM system: both
 # FrontEnd.tracking() (pose-only optimization) and BackEnd.map()/
@@ -310,6 +311,42 @@ def render(
                 theta=viewpoint_camera.cam_rot_delta,
                 rho=viewpoint_camera.cam_trans_delta,
             )[0]
+        # Maps rendered from the map's shape (normals of flat Gaussians,
+        # shortest_axis, D149): rasterized like the extra maps at every
+        # render, except while the map is frozen for this camera (tracking,
+        # graphed colour refinement; utils/perf.map_frozen), where they are
+        # rasterized ONCE per frame, without
+        # gradient, into the frame's constants that the shader reads; the
+        # G-buffer keys then stay albedo/depth/opacity (CUDA graphs and
+        # compiled shading unchanged).
+        frame_rasters = shader.frame_rasters(pc, viewpoint_camera)
+        if mask is not None and frame_rasters:
+            raise NotImplementedError("frame light rasters with a Gaussian mask")
+        for key, colours in frame_rasters.items():
+            def raster(colours=colours):
+                return rasterizer(
+                    means3D=means3D,
+                    means2D=means2D,
+                    shs=None,
+                    colors_precomp=colours(),
+                    opacities=pc.get_opacity,
+                    scales=scales,
+                    rotations=rotations,
+                    cov3D_precomp=cov3D_precomp,
+                    theta=viewpoint_camera.cam_rot_delta,
+                    rho=viewpoint_camera.cam_trans_delta,
+                )[0]
+
+            if map_frozen(viewpoint_camera):
+                def build(raster=raster):
+                    with torch.no_grad():
+                        return raster()
+
+                frame_constant(viewpoint_camera, ("frame_raster", key), build)
+            else:
+                if key in gbuffer:
+                    raise ValueError(f"frame raster {key!r} clashes with the G-buffer")
+                gbuffer[key] = raster()
         if defer_shading:
             # The caller shades later with apply_shading (the tracking loop
             # replays shading + loss as one CUDA graph, D130).

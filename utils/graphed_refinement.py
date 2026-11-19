@@ -118,6 +118,9 @@ class GraphedRefinement:
                 cam = self.viewpoints[k]
                 if cam.frame_cache is None:
                     cam.frame_cache = {}
+                # Geometry is not refined: maps rendered from the map's shape
+                # are keyframe constants (utils/perf.map_frozen, D149).
+                cam.map_frozen = True
                 pkg = render(cam, self.gaussians, self.pipe, self.background, shader=self.shader,
                              raster_count=self.count)
                 self._loss(pkg, cam)

@@ -256,6 +256,7 @@ def test_light_config_set():
         "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_bilateral.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_rastfd5.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_bilateral_fill.yaml",
+        "rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p64_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_cell0p8_parallel_fused.yaml",
         "rgbd_lambert_calib_ambgrid_sparse.yaml",
@@ -293,7 +294,14 @@ def test_every_light_config_resolves_and_builds(monkeypatch, path):
     cfg = load_config(os.path.relpath(path, REPO))
     assert cfg["Dataset"]["sensor_type"] == "depth"
     read_light_tracking(cfg)
-    assert build_shader(cfg, _FAKE_PARAMS) is not None
+    shader = build_shader(cfg, _FAKE_PARAMS)
+    assert shader is not None
+    # Training.scale_regularizer (D149): every config states it, and normals
+    # from the Gaussians' shape need flat Gaussians (as BackEnd checks).
+    from utils.scale_regularizer import read_scale_regularizer
+
+    reg = read_scale_regularizer(cfg)
+    assert reg.name == ("disc" if shader.uses_gaussian_normals() else "isotropic")
 
 
 def test_verify_reparam_is_the_rgbd_baseline_with_an_identity_shader(monkeypatch):

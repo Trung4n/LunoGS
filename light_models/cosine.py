@@ -103,7 +103,15 @@ class Lambert:
             known = (n_valid & valid).to(factor.dtype)
             mean = (factor * known).sum() / known.sum().clamp_min(1.0)
             factor = torch.where(n_valid, factor, mean)
-        return factor, {"cos_nl": cos_nl, "normal_valid": n_valid}
+        aux = {"cos_nl": cos_nl, "normal_valid": n_valid}
+        # Mapping penalty of normal sources rendered from the map
+        # (shortest_axis supervision, D149); a scalar, see ColocatedShader.
+        penalty = getattr(self.normals, "penalty", None)
+        if penalty is not None:
+            p = penalty(n, n_valid, points, valid, gbuffer, camera)
+            if p is not None:
+                aux["map_penalty"] = p
+        return factor, aux
 
 
 declare_planned("cosine")  # no planned forms beyond none / lambert

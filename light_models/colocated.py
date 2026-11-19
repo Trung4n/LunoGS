@@ -302,6 +302,39 @@ class ColocatedShader:
         in extra passes before calling the shader."""
         return self.ambient.extra_rasters(gaussians) if self._ambient_maps else {}
 
+    # ---- normals rendered from the map (shortest_axis, D149) ----
+
+    def _gaussian_normals(self):
+        normals = getattr(self.cosine, "normals", None)
+        return normals if hasattr(normals, "frame_rasters") else None
+
+    def uses_gaussian_normals(self):
+        """True when the shading reads normals rendered from the Gaussians'
+        shapes (the backend then requires flat Gaussians)."""
+        return self._gaussian_normals() is not None
+
+    def frame_rasters(self, gaussians, camera):
+        """{gbuffer key: function -> (N,3) colours} that render() rasterizes
+        at every render, except while the map is frozen for the camera (the
+        frame being tracked, the keyframes of the graphed refinement;
+        utils/perf.map_frozen), where it rasterizes them once per frame
+        without gradient (utils/perf.frame_constant). Empty during
+        the Lambert warm-up, which reads no normal."""
+        normals = self._gaussian_normals()
+        if normals is None or not getattr(self.cosine, "active", True):
+            return {}
+        return normals.frame_rasters(gaussians, camera)
+
+    def initial_orientation(self, camera, depth):
+        """(normals (3,H,W) camera frame, valid (H,W), flatness) for the new
+        Gaussians of a keyframe placed at `depth` (H,W tensor), or None when
+        the shading does not read the Gaussians' shapes."""
+        normals = self._gaussian_normals()
+        if normals is None:
+            return None
+        n, ok = normals.initial_orientation(camera, depth)
+        return n, ok, normals.init_flatness
+
     def __call__(self, gbuffer, viewpoint_camera):
         albedo = gbuffer["albedo"]
         points, valid = surface_points(gbuffer, viewpoint_camera, self.opacity_thr)
@@ -337,12 +370,15 @@ class ColocatedShader:
             "light_valid": valid[None],
             "light_direct": (direct if direct.dim() == 3 else direct[None]),
         }
+        # Scalar regularizers, added by get_loss_mapping only (never in
+        # tracking or the offline refinement): the ambient's L1 (D121) and the
+        # supervision of normals rendered from the map (D149).
+        penalties = [d["map_penalty"] for d in (aux, amb) if "map_penalty" in d]
         for name, value in aux.items():
-            out["light_" + name] = value[None]
+            if name != "map_penalty":
+                out["light_" + name] = value[None]
         if "ambient_residual" in amb:
             out["light_ambient_residual"] = amb["ambient_residual"]  # (3,H,W)
-        if "map_penalty" in amb:
-            # Scalar regularizer added by get_loss_mapping only (never in
-            # tracking or the offline refinement).
-            out["light_map_penalty"] = amb["map_penalty"]
+        if penalties:
+            out["light_map_penalty"] = penalties[0] if len(penalties) == 1 else penalties[0] + penalties[1]
         return out

@@ -208,7 +208,7 @@ def test_shader_pickles():
         ({"cosine": {"type": "lambert", "warmup_keyframes": 0}}, KeyError),  # normal_source missing
         ({"cosine": {"type": "lambert", "normal_source": {"type": "gbuffer"}}}, KeyError),  # warmup missing
         ({"cosine": {"type": "lambert", "normal_source": {"type": "gbuffer"}, "warmup_keyframes": -1}}, ValueError),
-        ({"cosine": {"type": "lambert", "normal_source": {"type": "shortest_axis"}, "warmup_keyframes": 0}}, NotImplementedError),
+        ({"cosine": {"type": "lambert", "normal_source": {"type": "shortest_axis"}, "warmup_keyframes": 0}}, KeyError),  # options missing (D149)
         ({"ambient": {"type": "multiplicative_const"}}, KeyError),  # c missing
         ({"ambient": {"type": "none", "c": _p("ambient.c_config")}}, ValueError),
         ({"gbuffer": {"opacity_thr": 0}}, ValueError),

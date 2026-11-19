@@ -17,7 +17,7 @@ const PANES = ["map", "obs", "render", "albedo", "depth", "mini"];
 
 const S = {
   renderer: "", runs: [], active: [], frames: [], idx: 0, pinned: "map",
-  playing: false, speed: 1, mode: "follow", color: "color",
+  playing: false, speed: 1, mode: "follow", color: "color", mapSrc: "live",
   layers: new Set(["est", "gt", "frustum", "kf"]),
   ceiling: false, ceilingTouched: false, trail: 300, trailTouched: false,
   thumbs: true, mini: true, orbitSec: 30, ptScale: 5, crisp: true,
@@ -300,8 +300,25 @@ function snapIndex(run, f) {
   run.gaussians.forEach((g, j) => { if (g[0] <= f) k = j; });
   return k;
 }
+// Which map the views draw (S.mapSrc): the snapshot of the current time, or
+// the final online map / the map after the color refinement at every frame.
+const MAP_NAME = { live: "", final: "bản đồ cuối", refined: "sau refine" };
+const MAP_MISSING = { final: "không có bản đồ cuối (final.npz)",
+  refined: "không có bản đồ sau refine (final_refined.npz)" };
+function snapKey(run, f) {
+  if (S.mapSrc === "final") return run.final_snap;                 // null: not recorded
+  if (S.mapSrc === "refined") return run.refined_gaussians === null ? null : "refined";
+  return snapIndex(run, f);
+}
+function gaussiansShown(run, f) {
+  if (S.mapSrc === "final") return run.final_snap === null ? 0 : run.gaussians[run.final_snap][1];
+  if (S.mapSrc === "refined") return run.refined_gaussians ?? 0;
+  return gaussiansAt(run, f);
+}
+const NO_POINTS = Promise.resolve(new ArrayBuffer(16));            // header only: n = 0
 function points(i, snap, color) {
   const key = `${i}:${snap}:${color}`;
+  if (snap === null) return [key, NO_POINTS];
   if (!pointsCache.has(key)) {
     pointsCache.set(key, api(`/api/points?run=${i}&snap=${snap}&color=${color}`).then((r) => r.arrayBuffer()));
     while (pointsCache.size > 12) pointsCache.delete(pointsCache.keys().next().value);
@@ -522,7 +539,7 @@ function setMode(mode) {
 
 function renderURL(k, w, h, f) {
   const run = activeRuns()[k];
-  const p = new URLSearchParams({ run: S.active[k], frame: f, w, h, color: S.color, mode: S.mode,
+  const p = new URLSearchParams({ run: S.active[k], frame: f, w, h, color: S.color, mode: S.mode, map: S.mapSrc,
     layers: [...S.layers].join(","), trail: S.trail, fov: FOV, ceiling: S.ceiling ? CEILING_MARGIN : "none" });
   if (S.mode === "free") {
     p.set("eye", freeEye(S.free, run.up).join(","));
@@ -618,11 +635,13 @@ function tick(now) {
       const run = S.runs[v.i];
       const gl = usesGL(v);
       v.vp.classList.toggle("gl", gl);
-      v.modeLabel.textContent = S.mode === "orbit" ? "orbit · WebGL"
+      const snap = snapKey(run, f);
+      const modeText = S.mode === "orbit" ? "orbit · WebGL"
         : S.mode === "free" ? (gl ? "tự do · WebGL" : "tự do · Gaussian") : S.mode;
+      v.modeLabel.textContent = snap === null ? MAP_MISSING[S.mapSrc]
+        : MAP_NAME[S.mapSrc] ? `${modeText} · ${MAP_NAME[S.mapSrc]}` : modeText;
       const data = loadTraj(v.i);
       if (!data) return;
-      const snap = snapIndex(run, f);
       if (gl) {
         v.gl = v.gl || makeGL(v.canvas);
         if (v.gl) {
@@ -831,7 +850,9 @@ function drawStats() {
       <div class="kv">
         <span class="k">Frame</span><span class="v big">${f}</span>
         <span class="k">Keyframe</span><span class="v big">${nKf(run, f)}</span>
-        <span class="k">Gaussian trong bản đồ</span><span class="v big">${gaussiansAt(run, f).toLocaleString("vi-VN")}</span>
+        <span class="k">Gaussian trong bản đồ</span><span class="v big">${gaussiansShown(run, f).toLocaleString("vi-VN")}</span>
+        <span class="k">Bản đồ hiển thị</span><span class="v">${snapKey(run, f) === null ? MAP_MISSING[S.mapSrc] : MAP_NAME[S.mapSrc] || "theo thời gian"}</span>
+        <span class="k">Gaussian cuối / sau refine</span><span class="v">${run.final_snap === null ? "–" : run.gaussians[run.final_snap][1].toLocaleString("vi-VN")} / ${run.refined_gaussians === null ? "–" : run.refined_gaussians.toLocaleString("vi-VN")}</span>
         ${ateRows}
         <span class="k">PSNR / SSIM / LPIPS</span><span class="v big">${fmt(seriesAt(m.psnr, f), 2)} / ${fmt(seriesAt(m.ssim, f), 3)} / ${fmt(seriesAt(m.lpips, f), 3)}</span>
         <span class="k">Trung bình cả chuỗi</span><span class="v">${fmt(seriesMean(m.psnr), 2)} / ${fmt(seriesMean(m.ssim), 3)} / ${fmt(seriesMean(m.lpips), 3)}</span>
@@ -1059,9 +1080,18 @@ async function pollExport() {
     $("exstatus").textContent = `Lỗi: ${st.message}`;
   }
 }
+// Map choices no shown run has are disabled; a disabled choice falls back to
+// the timeline (visibly, in the select).
+function updateMapChoices() {
+  const has = { live: true, final: activeRuns().some((r) => r.final_snap !== null),
+    refined: activeRuns().some((r) => r.refined_gaussians !== null) };
+  [...$("mapsrc").options].forEach((o) => { o.disabled = !has[o.value]; });
+  if (!has[S.mapSrc]) { S.mapSrc = "live"; $("mapsrc").value = "live"; }
+}
 function refreshAll() {
   S.runs.forEach((_, i) => loadMetrics(i));
   computeFrames();
+  updateMapChoices();
   buildStage();
   if (S.panel === "records") buildRecords();
   setMode(S.mode);
@@ -1074,6 +1104,7 @@ function wire() {
   document.querySelectorAll("#rail button").forEach((b) => (b.onclick = () => openPanel(b.dataset.open)));
   $("dclose").onclick = () => openPanel(S.panel);
   $("color").onchange = (e) => { S.color = e.target.value; show(); };
+  $("mapsrc").onchange = (e) => { S.mapSrc = e.target.value; show(); };
   document.querySelectorAll("[data-layer]").forEach((cb) => (cb.onchange = () => {
     if (cb.checked) S.layers.add(cb.dataset.layer); else S.layers.delete(cb.dataset.layer);
     show();

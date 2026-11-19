@@ -61,6 +61,16 @@ class IdentityShader:
     def extra_rasters(self, gaussians):
         return {}
 
+    # No normals rendered from the map (D149).
+    def uses_gaussian_normals(self):
+        return False
+
+    def frame_rasters(self, gaussians, camera):
+        return {}
+
+    def initial_orientation(self, camera, depth):
+        return None
+
 
 def _make_identity(light_cfg, load_params):
     if "schedule" in light_cfg:
