@@ -10,6 +10,10 @@
 # vs 0.0031) and heavy ATE 2.3-2.4 cm (two runs) against 1.6, although the map
 # normals are better (8.3 deg vs 15.3 for one frame's bilateral normals).
 # Still no gradient through the normals (they would pull tracking, D48).
+#
+# NEGATIVE RESULT (Kaggle, heavy, one run): ATE 2.75 cm, RPE 0.0068, PSNR
+# 33.78, 2.32 FPS (tracking +80 ms per frame). The pixel shift of the normals
+# was not the cause; kept as an ablation.
 inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml"
 
 Light:
