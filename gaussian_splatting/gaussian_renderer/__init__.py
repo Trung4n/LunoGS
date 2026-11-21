@@ -334,11 +334,12 @@ def render(
                         shs=None,
                         colors_precomp=colours(),
                         opacities=pc.get_opacity.detach(),
-                        scales=None if scales is None else scales.detach(),
-                        rotations=None if rotations is None else rotations.detach(),
-                        cov3D_precomp=None if cov3D_precomp is None else cov3D_precomp.detach(),
-                        theta=viewpoint_camera.cam_rot_delta.detach(),
-                        rho=viewpoint_camera.cam_trans_delta.detach(),
+                        scales=_detached(scales),
+                        rotations=_detached(rotations),
+                        cov3D_precomp=_detached(cov3D_precomp),
+                        # None for cameras without pose deltas (eval_rendering).
+                        theta=_detached(viewpoint_camera.cam_rot_delta),
+                        rho=_detached(viewpoint_camera.cam_trans_delta),
                     )[0]
                 return rasterizer(
                     means3D=means3D,
@@ -370,6 +371,10 @@ def render(
             return render_pkg
         apply_shading(render_pkg, gbuffer, shader, viewpoint_camera)
     return render_pkg
+
+
+def _detached(t):
+    return None if t is None else t.detach()
 
 
 def apply_shading(render_pkg, gbuffer, shader, viewpoint_camera):

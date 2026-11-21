@@ -327,3 +327,68 @@ def test_raster_gradient_reaches_the_shader_hook():
     shader = ColocatedShader.__new__(ColocatedShader)
     shader.cosine = SimpleNamespace(normals=_source(raster_gradient="rotation"))
     assert shader.frame_raster_gradient() == "rotation"
+
+
+# ---- the normal raster's gradient in render() (raster_gradient), CUDA ----
+
+cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+
+
+def _map(n=100):
+    from munch import munchify
+
+    from gaussian_splatting.scene.gaussian_model import GaussianModel
+
+    g = GaussianModel(0, config={"Training": {}})
+    g.init_lr(6.0)
+    g.training_setup(munchify(dict(percent_dense=0.01, position_lr_init=1e-4, position_lr_final=1e-6,
+                                   position_lr_delay_mult=0.01, position_lr_max_steps=100,
+                                   feature_lr=1e-3, opacity_lr=0.05, scaling_lr=1e-3, rotation_lr=1e-3)))
+    side = int(math.isqrt(n))
+    v, u = torch.meshgrid(torch.linspace(-0.6, 0.6, side), torch.linspace(-1.0, 1.0, side), indexing="ij")
+    xyz = torch.stack([u.flatten(), v.flatten(), torch.full((side * side,), 2.0)], 1).cuda()
+    m = xyz.shape[0]
+    rots = torch.zeros(m, 4, device="cuda")
+    rots[:, 0] = 1
+    g.extend_from_pcd(xyz, torch.full((m, 3, 1), 0.5, device="cuda"),
+                      torch.log(torch.full((m, 3), 0.08, device="cuda")), rots,
+                      torch.full((m, 1), 2.0, device="cuda"), kf_id=0)
+    return g
+
+
+class _NormalRasterShader:
+    """Only what render(defer_shading=True) asks of a shader with one frame raster."""
+
+    def __init__(self, gradient):
+        self.gradient = gradient
+
+    def extra_rasters(self, pc):
+        return {}
+
+    def frame_rasters(self, pc, camera):
+        return {"gaussian_normal": lambda: pc.get_rotation[:, 1:4] + 0.5}
+
+    def frame_raster_gradient(self):
+        return self.gradient
+
+
+@cuda
+@pytest.mark.parametrize("gradient", ["all", "rotation"])
+def test_raster_gradient_in_render_and_cameras_without_pose_deltas(gradient):
+    from gaussian_splatting.gaussian_renderer import render
+    from utils.camera_utils import Camera
+
+    g = _map()
+    h, w, f = 60, 80, 60.0
+    cam = Camera.init_from_gui(0, torch.eye(4, device="cuda"), 2 * math.atan(w / (2 * f)),
+                               2 * math.atan(h / (2 * f)), f, f, w / 2, h / 2, h, w)
+    cam.update_RT(torch.eye(3, device="cuda"), torch.zeros(3, device="cuda"))
+    cam.cam_rot_delta = cam.cam_trans_delta = None  # as the cameras of eval_rendering
+    pipe = SimpleNamespace(compute_cov3D_python=False, convert_SHs_python=False, debug=False)
+    pkg = render(cam, g, pipe, torch.zeros(3, device="cuda"), shader=_NormalRasterShader(gradient),
+                 defer_shading=True)
+    pkg["gbuffer"]["gaussian_normal"].sum().backward()
+    assert float(g._rotation.grad.abs().sum()) > 0
+    moved = g._xyz.grad is not None and float(g._xyz.grad.abs().sum()) > 0
+    faded = g._opacity.grad is not None and float(g._opacity.grad.abs().sum()) > 0
+    assert (moved and faded) == (gradient == "all")
