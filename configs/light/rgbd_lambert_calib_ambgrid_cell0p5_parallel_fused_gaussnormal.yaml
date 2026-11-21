@@ -36,6 +36,8 @@ Light:
       # Rendered once per frame at the initial pose (the previous frame's);
       # `_gaussnormal_refresh` re-renders them during tracking (D149).
       tracking_refresh_every: null
+      # Mapping gradient through the normal raster: all of the geometry (D149).
+      raster_gradient: all
       init:
         type: sensor_depth_bilateral_fd_edge
         stencil_px: 4

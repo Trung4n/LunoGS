@@ -1,0 +1,17 @@
+# rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml with the
+# mapping gradient through the rasterized normals going to the Gaussians'
+# ROTATION only (raster_gradient: rotation, docs/DECISIONS.md D149): the
+# shading and the normal supervision can turn a disc, but no longer move, fade
+# or resize it, nor move the keyframe pose; position, opacity and scale follow
+# the albedo and depth losses as for the spheres of `_bilateral_fill`.
+#
+# Why: on heavy depth noise the depth rendered from the `_gaussnormal` map is
+# as far from the clean depth as one noisy sensor frame (Kaggle, median
+# 17.8 mm vs 18.3; spheres 10.1). Local 60 frames: spheres 7.7 mm, thin discs
+# 11.6, thick discs (`_gaussnormal_thick`) 12.4: not the thinness.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml"
+
+Light:
+  cosine:
+    normal_source:
+      raster_gradient: rotation

@@ -322,8 +322,24 @@ def render(
         frame_rasters = shader.frame_rasters(pc, viewpoint_camera)
         if mask is not None and frame_rasters:
             raise NotImplementedError("frame light rasters with a Gaussian mask")
+        # 'rotation': the losses reach the Gaussians only through the colours
+        # (their rotation), not their position, opacity, scale or the pose.
+        rotation_only = bool(frame_rasters) and shader.frame_raster_gradient() == "rotation"
         for key, colours in frame_rasters.items():
             def raster(colours=colours):
+                if rotation_only:
+                    return rasterizer(
+                        means3D=means3D.detach(),
+                        means2D=torch.zeros_like(means2D),
+                        shs=None,
+                        colors_precomp=colours(),
+                        opacities=pc.get_opacity.detach(),
+                        scales=None if scales is None else scales.detach(),
+                        rotations=None if rotations is None else rotations.detach(),
+                        cov3D_precomp=None if cov3D_precomp is None else cov3D_precomp.detach(),
+                        theta=viewpoint_camera.cam_rot_delta.detach(),
+                        rho=viewpoint_camera.cam_trans_delta.detach(),
+                    )[0]
                 return rasterizer(
                     means3D=means3D,
                     means2D=means2D,

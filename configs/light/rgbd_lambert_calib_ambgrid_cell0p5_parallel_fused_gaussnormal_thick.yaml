@@ -1,0 +1,20 @@
+# rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml with
+# THICK discs: new Gaussians start at half their in-plane size along the normal
+# (init_flatness 0.5, was 0.1) and nothing flattens them further
+# (flatness_weight 0, was 0.1); the in-plane term still keeps the two largest
+# scales equal, so the shortest axis stays defined (docs/DECISIONS.md D149).
+#
+# Why: on heavy depth noise the depth rendered from the `_gaussnormal` map is
+# as far from the clean depth as one noisy sensor frame (median 17.8 mm vs
+# 18.3), where the spheres of `_bilateral_fill` average it down to 10.1 mm.
+# A thin opaque disc in front hides the ones behind it; overlapping thick
+# Gaussians blend the depths along the ray.
+inherit_from: "configs/light/rgbd_lambert_calib_ambgrid_cell0p5_parallel_fused_gaussnormal.yaml"
+
+Training:
+  scale_regularizer: {_replace: true, type: disc, in_plane_weight: 10, flatness_weight: 0}
+
+Light:
+  cosine:
+    normal_source:
+      init_flatness: 0.5

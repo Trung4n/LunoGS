@@ -18,7 +18,8 @@ INIT = {"type": "depth_fd", "stencil_px": 1}
 
 def _source(**over):
     block = {"type": "shortest_axis", "min_agreement": 0.5, "init_flatness": 0.1, "init": INIT,
-             "supervision": None, "tracking_refresh_every": None}
+             "supervision": None, "tracking_refresh_every": None,
+             "raster_gradient": "all"}
     block.update(over)
     return build_component("normals", block, "Light.cosine.normal_source", None)
 
@@ -250,7 +251,7 @@ def test_supervision_reaches_the_lambert_aux_and_has_gradient():
         "type": "lambert", "warmup_keyframes": 0,
         "normal_source": {"type": "shortest_axis", "min_agreement": 0.5, "init_flatness": 0.1,
                           "init": INIT, "supervision": {"weight": 1.0, "source": {"type": "gbuffer"}},
-                          "tracking_refresh_every": None},
+                          "tracking_refresh_every": None, "raster_gradient": "all"},
     }, "Light.cosine", {})
     raw = torch.zeros(3, H, W)
     raw[1] = -0.3
@@ -312,3 +313,17 @@ def test_drop_frame_rasters_rebuilds_into_the_same_pooled_buffer():
     # Same memory (what a recorded CUDA graph reads), new values.
     assert again is first and bool((first == 1).all())
     assert frame_constant(cam, ("observation",), lambda: torch.zeros(2)) is obs
+
+
+@pytest.mark.parametrize("value", ["none", None, True])
+def test_bad_raster_gradient(value):
+    with pytest.raises(ValueError):
+        _source(raster_gradient=value)
+
+
+def test_raster_gradient_reaches_the_shader_hook():
+    from light_models.colocated import ColocatedShader
+
+    shader = ColocatedShader.__new__(ColocatedShader)
+    shader.cosine = SimpleNamespace(normals=_source(raster_gradient="rotation"))
+    assert shader.frame_raster_gradient() == "rotation"

@@ -71,6 +71,9 @@ class IdentityShader:
     def tracking_refresh_every(self):
         return None
 
+    def frame_raster_gradient(self):
+        raise NotImplementedError("no frame rasters")
+
     def initial_orientation(self, camera, depth):
         return None
 

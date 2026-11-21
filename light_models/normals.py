@@ -333,7 +333,8 @@ def quaternion_from_z(n):
     return q / q.norm(dim=1, keepdim=True)
 
 
-@register("normals", "shortest_axis", options=("min_agreement", "init_flatness", "init", "supervision", "tracking_refresh_every"))
+@register("normals", "shortest_axis", options=("min_agreement", "init_flatness", "init", "supervision", "tracking_refresh_every",
+                  "raster_gradient"))
 class ShortestAxis:
     """Normals from the map itself: each Gaussian's shortest axis, flipped to
     face the camera, rasterized like a colour (docs/DECISIONS.md D149). The
@@ -369,6 +370,14 @@ class ShortestAxis:
     shifted against the observation, which the sensor-depth sources never
     are (they come from the observed frame). Kaggle, once per frame: RPE
     higher than `_bilateral_fill` at every depth-noise level (D149).
+    raster_gradient (required): `all` = the mapping losses reach the
+    Gaussians' rotation, position, opacity and scale (and the keyframe pose)
+    through the rasterized normals; `rotation` = only the rotation, through
+    the colours, the rest of the normal raster detached. Why: with `all` the
+    shading and the supervision can move and fade Gaussians to fit the
+    normals, and the depth rendered from the map on heavy depth noise stays
+    at one noisy frame's error (17.8 mm vs 10.1 for the spheres of
+    `_bilateral_fill`, D149).
     supervision (required; null = none): {weight, source}. In mapping, the
     penalty weight * mean (1 - n . n_s) over the pixels where both have a
     normal, n the map's normal (with gradient) and n_s that of `source`, a
@@ -384,8 +393,11 @@ class ShortestAxis:
 
     KEY = "gaussian_normal"
 
-    def __init__(self, min_agreement, init_flatness, init, supervision, tracking_refresh_every):
+    def __init__(self, min_agreement, init_flatness, init, supervision, tracking_refresh_every, raster_gradient):
         where = "Light.cosine.normal_source"
+        if raster_gradient not in ("all", "rotation"):
+            raise ValueError(f"{where}.raster_gradient must be 'all' or 'rotation', got {raster_gradient!r}")
+        self.raster_gradient = raster_gradient
         r = tracking_refresh_every
         if r is not None and (isinstance(r, bool) or not isinstance(r, int) or r < 1):
             raise ValueError(f"{where}.tracking_refresh_every must be null or an integer >= 1, got {r!r}")

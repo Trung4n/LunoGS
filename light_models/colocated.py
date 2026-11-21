@@ -320,6 +320,11 @@ class ColocatedShader:
         normals = self._gaussian_normals()
         return None if normals is None else normals.tracking_refresh_every
 
+    def frame_raster_gradient(self):
+        """'all' or 'rotation' (shortest_axis.raster_gradient): what the
+        frame rasters pass gradient to besides their colours."""
+        return self._gaussian_normals().raster_gradient
+
     def frame_rasters(self, gaussians, camera):
         """{gbuffer key: function -> (N,3) colours} that render() rasterizes
         at every render, except while the map is frozen for the camera (the
